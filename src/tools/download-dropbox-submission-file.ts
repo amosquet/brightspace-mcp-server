@@ -18,6 +18,7 @@ import { D2LApiClient, ApiError } from "../api/index.js";
 import { DownloadDropboxSubmissionFileSchema } from "./schemas.js";
 import { toolResponse, sanitizeError, errorResponse } from "./tool-helpers.js";
 import { sensitiveDestination, sensitiveDestinationMessage } from "../utils/sensitive-paths.js";
+import { currentHttpFileStager } from "../http-files.js";
 import { log } from "../utils/logger.js";
 import { validateContentId, DISK_MAX_FILE_SIZE } from "../utils/file-validator.js";
 import { secureStreamDownload, expectedLength } from "../utils/download-helpers.js";
@@ -76,26 +77,37 @@ export function registerDownloadDropboxSubmissionFile(
         validateContentId(submissionId);
         validateContentId(fileId);
 
-        if (!path.isAbsolute(downloadPath)) {
-          return errorResponse(
-            "downloadPath must be an absolute path (e.g., /Users/username/Downloads or C:\\Users\\username\\Downloads)", "invalidInput"
-          );
-        }
+        const stager = currentHttpFileStager();
+        if (downloadPath === undefined) {
+          if (!stager) {
+            return errorResponse(
+              "downloadPath is required when the server is not running in HTTP mode.",
+              "invalidInput"
+            );
+          }
+        } else {
+          if (!path.isAbsolute(downloadPath)) {
+            return errorResponse(
+              "downloadPath must be an absolute path (e.g., /Users/username/Downloads or C:\\Users\\username\\Downloads)", "invalidInput"
+            );
+          }
 
-        try {
-          const stats = await fs.stat(downloadPath);
-          if (!stats.isDirectory()) {
-            return errorResponse(`downloadPath is not a directory: ${downloadPath}`, "destination");
+          const protectedReason = await sensitiveDestination(downloadPath);
+          if (protectedReason) {
+            return errorResponse(sensitiveDestinationMessage(downloadPath, protectedReason), "destination");
           }
-        } catch (error: any) {
-          if (error?.code === "ENOENT") {
-            return errorResponse(`Download directory does not exist: ${downloadPath}. Create it, then retry, or choose an existing directory.`, "destination");
+
+          try {
+            const stats = await fs.stat(downloadPath);
+            if (!stats.isDirectory()) {
+              return errorResponse(`downloadPath is not a directory: ${downloadPath}`, "destination");
+            }
+          } catch (error: any) {
+            if (error?.code === "ENOENT") {
+              return errorResponse(`Download directory does not exist: ${downloadPath}. Create it, then retry, or choose an existing directory.`, "destination");
+            }
+            throw error;
           }
-          throw error;
-        }
-        const protectedReason = await sensitiveDestination(downloadPath);
-        if (protectedReason) {
-          return errorResponse(sensitiveDestinationMessage(downloadPath, protectedReason), "destination");
         }
 
         // Fetch submission metadata to get the file list and validate fileId.
@@ -138,8 +150,10 @@ export function registerDownloadDropboxSubmissionFile(
           throw error;
         }
 
+        const maxAllowedBytes = downloadPath !== undefined ? DISK_MAX_FILE_SIZE : stager!.maxFileSize;
+
         // Check the size Brightspace reported before downloading anything.
-        if (targetFile.Size > DISK_MAX_FILE_SIZE) {
+        if (targetFile.Size > maxAllowedBytes) {
           return tooLargeResponse(targetFile.Size);
         }
 
@@ -163,7 +177,7 @@ export function registerDownloadDropboxSubmissionFile(
 
         // Check Content-Length before reading the body.
         const contentLength = parseInt(response.headers.get("Content-Length") ?? "0", 10);
-        if (contentLength > DISK_MAX_FILE_SIZE) {
+        if (contentLength > maxAllowedBytes) {
           return tooLargeResponse(contentLength);
         }
 
@@ -173,6 +187,29 @@ export function registerDownloadDropboxSubmissionFile(
 
         const originalFilename = targetFile.FileName;
         const effectiveFilename = customFilename || originalFilename;
+
+        if (downloadPath === undefined) {
+          const staged = await stager!.stageStream(
+            response.body,
+            effectiveFilename,
+            originalFilename,
+            expectedLength(response)
+          );
+          log(
+            "INFO",
+            `download_dropbox_submission_file: staged ${staged.filename} (${staged.size} bytes, ${staged.mimeType})`
+          );
+          return toolResponse({
+            success: true,
+            mode: "staged",
+            fileSize: staged.size,
+            mimeType: staged.mimeType,
+            originalFilename,
+            downloadUrl: staged.downloadUrl,
+            downloadUrlExpiresAt: staged.downloadUrlExpiresAt,
+            message: `File staged for download at ${staged.downloadUrl}`,
+          });
+        }
 
         // secureStreamDownload streams the body to a temporary file in the
         // target directory, applies this project's path-containment and
@@ -193,6 +230,10 @@ export function registerDownloadDropboxSubmissionFile(
           `download_dropbox_submission_file: saved ${result.path} (${result.size} bytes, ${result.mime})`
         );
 
+        const staged = stager && result.size <= stager.maxFileSize
+          ? await stager.stageExistingFile(result.path, path.basename(result.path), result.mime, result.size)
+          : undefined;
+
         return toolResponse({
           success: true,
           filePath: result.path,
@@ -200,6 +241,12 @@ export function registerDownloadDropboxSubmissionFile(
           mimeType: result.mime,
           originalFilename,
           message: `File downloaded successfully to ${result.path}`,
+          ...(staged
+            ? {
+                downloadUrl: staged.downloadUrl,
+                downloadUrlExpiresAt: staged.downloadUrlExpiresAt,
+              }
+            : {}),
         });
       } catch (error) {
         return sanitizeError(error);

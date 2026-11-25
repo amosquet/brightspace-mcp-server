@@ -5,7 +5,6 @@
  */
 
 import type { Browser, BrowserContext, Locator, Page, Request } from "playwright";
-import { readFileSync, accessSync } from "node:fs";
 import type { AppConfig, TokenData } from "../types/index.js";
 import { BrowserAuthError } from "../utils/errors.js";
 import { log } from "../utils/logger.js";
@@ -20,7 +19,7 @@ import { authLockPath, publishAutomaticProgress, publishChallenge, relayChalleng
 import type { AuthPhase } from "./auth-phases.js";
 import { AuthCooldown } from "./auth-cooldown.js";
 import { mintAccessToken } from "./token-mint.js";
-import { launchWithBrowserRecovery } from "../utils/browser-install.js";
+import { containerLaunchArgs, launchWithBrowserRecovery } from "../utils/browser-install.js";
 import { signInCommand } from "../utils/commands.js";
 
 const SILENT_SSO_TIMEOUT_MS = 30000;
@@ -170,21 +169,6 @@ export class BrowserAuth {
     }
   }
 
-  private static isWSLOrDocker(): boolean {
-    try {
-      if (/microsoft|wsl/i.test(readFileSync("/proc/version", "utf8"))) return true;
-    } catch { /* Not WSL. */ }
-    try {
-      accessSync("/.dockerenv");
-      return true;
-    } catch { /* Not Docker. */ }
-    try {
-      return /docker|containerd/.test(readFileSync("/proc/1/cgroup", "utf8"));
-    } catch {
-      return false;
-    }
-  }
-
   async authenticate(options: AuthenticateOptions = {}): Promise<TokenData> {
     const release = await acquireProcessLock(
       this.lockPath,
@@ -228,8 +212,7 @@ export class BrowserAuth {
     };
     try {
       state = await this.stateStore.load();
-      const args = ["--disable-blink-features=AutomationControlled"];
-      if (BrowserAuth.isWSLOrDocker()) args.push("--no-sandbox", "--disable-setuid-sandbox");
+      const args = ["--disable-blink-features=AutomationControlled", ...containerLaunchArgs()];
       // Use Playwright's own timeout, which cleans up an unsuccessful launch.
       browser = await this.timed("launch", () => launchWithBrowserRecovery(async () => {
         const { chromium } = await import("playwright");

@@ -58,6 +58,7 @@ npx -y brightspace-mcp-server@latest auth
 ```
 
 - Network errors and locked native storage are reported without retrying MFA.
+- In headless cloud or container setups without an OS credential store, `D2L_PASSWORD` stays in memory (`src/utils/secure-config.ts`) and session encryption uses `D2L_SESSION_KEY` (`src/auth/credential-store.ts`).
 
 ## How long a call waits
 
@@ -332,6 +333,7 @@ npx -y brightspace-mcp-server@latest auth
   - The test is `createSSOFlow(config).hasCredentials()`. It is true for a username plus a saved password, or for Purdue's passwordless mode.
   - **Why:** a headless sign-in with nothing to sign in with can only wait and time out.
 - `visible: false` with no credentials is refused outright. The answer is `NEEDS_PASSWORD_FOR_HEADLESS`, so the timeout is not spent.
+- On a non-loopback `http` server, `AuthRunner.canOpenVisibleBrowser()` is `false`, so `visible: true` (or a sign-in without saved credentials) is refused immediately instead of launching a headed browser on the remote host.
 - A window is requested with `AuthRunner.requestVisibleBrowser()`.
   - It sets `D2L_HEADLESS=false` on the next child the runner starts.
   - It is one-shot.

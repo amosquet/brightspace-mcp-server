@@ -7,9 +7,10 @@
 import { D2LApiClient } from "../api/index.js";
 import { extractPdfText } from "../utils/pdf-extractor.js";
 import { officeDocumentText } from "../utils/zip-extract.js";
-import { readBodyCapped } from "../utils/download-helpers.js";
+import { readBodyCapped, expectedLength } from "../utils/download-helpers.js";
 import { DownloadError } from "../utils/download-errors.js";
 import { MAX_FILE_SIZE } from "../utils/file-validator.js";
+import { currentHttpFileStager, type StagedFileLink } from "../http-files.js";
 
 /**
  * Reading an attached file as text, wherever Brightspace hangs it: an
@@ -83,7 +84,33 @@ export async function readAttachment(
     truncated: false,
     note: `This file is over the ${MAX_FILE_SIZE / 1024 / 1024}MB text extraction limit. Use download_file with an absolute downloadPath to save it to disk instead.`,
   };
-  if (attachment.Size > MAX_FILE_SIZE) return tooLarge;
+  const stager = currentHttpFileStager();
+  if (attachment.Size > MAX_FILE_SIZE) {
+    if (stager && attachment.Size <= stager.maxFileSize) {
+      const response = await apiClient.getRaw(sourcePath);
+      if (response.body) {
+        try {
+          const staged = await stager.stageStream(
+            response.body,
+            attachment.FileName,
+            attachment.FileName,
+            expectedLength(response)
+          );
+          return {
+            ...base,
+            text: null,
+            truncated: false,
+            downloadUrl: staged.downloadUrl,
+            downloadUrlExpiresAt: staged.downloadUrlExpiresAt,
+            note: `This file is over the ${MAX_FILE_SIZE / 1024 / 1024}MB text extraction limit, so it was staged as a temporary download link.`,
+          };
+        } catch (error) {
+          if (!(error instanceof DownloadError)) throw error;
+        }
+      }
+    }
+    return tooLarge;
+  }
 
   const response = await apiClient.getRaw(sourcePath);
   let buffer: Buffer;
@@ -92,6 +119,15 @@ export async function readAttachment(
   } catch (error) {
     if (error instanceof DownloadError && error.kind === "tooLarge") return tooLarge;
     throw error;
+  }
+
+  let staged: StagedFileLink | undefined;
+  if (stager) {
+    try {
+      staged = await stager.stageBuffer(buffer, attachment.FileName, attachment.FileName);
+    } catch (error) {
+      if (!(error instanceof DownloadError)) throw error;
+    }
   }
 
   let text: string | null = null;
@@ -116,7 +152,9 @@ export async function readAttachment(
       break;
     }
     default: {
-      note = `Cannot extract text from a ${base.kind} file. Use download_file to save it.`;
+      note = staged
+        ? `Cannot extract text from a ${base.kind} file. Share downloadUrl with the user to download it.`
+        : `Cannot extract text from a ${base.kind} file. Use download_file to save it.`;
     }
   }
 
@@ -126,6 +164,12 @@ export async function readAttachment(
     bytes: buffer.length,
     text: truncated ? text!.slice(0, maxChars) : text,
     truncated,
+    ...(staged
+      ? {
+          downloadUrl: staged.downloadUrl,
+          downloadUrlExpiresAt: staged.downloadUrlExpiresAt,
+        }
+      : {}),
     ...(note ? { note } : {}),
   };
 }

@@ -6,6 +6,12 @@ A change that can break something a caller relied on is marked **Changed behavio
 
 Entries up to 5.2.1 were generated from the merged PR titles. Versions before 5.0.0 are in the [GitHub releases](https://github.com/RohanMuppa/brightspace-mcp-server/releases) and the git history.
 
+## 5.4.0 (2026-11-24)
+
+- feat: `http` can now run as a cloud-hosted MCP server (`--host 0.0.0.0` / `D2L_HTTP_HOST`, `D2L_TRANSPORT=http`, `PORT` support, `D2L_HTTP_ALLOWED_HOSTS` / `D2L_HTTP_ALLOWED_ORIGINS` with CORS preflight, `/healthz` and `/health` endpoints, `D2L_SESSION_KEY` when no OS credential store exists, plus `Dockerfile` and `docker-compose.yml`). Local `http` defaults remain bound to `127.0.0.1` with strict Host and Origin checks.
+- feat: in `http` mode, `download_file`, `get_assignment_files`, `get_announcement_files`, `get_syllabus`, and `download_dropbox_submission_file` now automatically stage files with short-lived, auto-purging `downloadUrl` links (`GET /files/<token>/<filename>`) so users and remote agents can download original attachments with zero filesystem setup.
+- fix: hardened cloud HTTP and file/session boundaries: protected `~/.d2l-session` / `D2L_SESSION_DIR` from downloads and `D2L_DOWNLOAD_ROOTS`, refused planted legacy plaintext `storage-state.json` after key setup, validated destination paths before `stat` across download and course-file tools, confined non-loopback `http` disk operations to `D2L_DOWNLOAD_ROOTS`, disabled remote visible-browser prompts, validated HTTP redirects against downgrade/cross-origin/private-network targets, and verified HTTPS/Entra origins before autofilling SSO credentials.
+
 ## 5.3.5 (2026-11-24)
 
 - fix: `get_assignments` for all courses now says when your course settings (`D2L_CURRENT_ONLY`, `D2L_INCLUDE_COURSES`, `D2L_EXCLUDE_COURSES`) hid some of your courses, and which ones, in a new `hiddenCourseIds` field and the notice, so your AI no longer reports a hidden course as having nothing due (#488).

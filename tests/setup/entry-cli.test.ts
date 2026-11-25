@@ -14,15 +14,19 @@ import * as path from "node:path";
 const indexJs = path.resolve(__dirname, "..", "..", "build", "index.js");
 
 function run(...args: string[]) {
+  return runWithEnv({}, ...args);
+}
+
+function runWithEnv(extraEnv: Record<string, string>, ...args: string[]) {
   const home = mkdtempSync(path.join(os.tmpdir(), "entry-cli-"));
   try {
     const result = spawnSync(process.execPath, [indexJs, ...args], {
       input: "",
       encoding: "utf-8",
-      env: { ...process.env, HOME: home, USERPROFILE: home, D2L_NO_UPDATE_CHECK: "1", VITEST: "" },
+      env: { ...process.env, HOME: home, USERPROFILE: home, D2L_NO_UPDATE_CHECK: "1", VITEST: "", ...extraEnv },
       timeout: 20_000,
     });
-    return { ...result, homeEntries: readdirSync(home) };
+    return { ...result, homeEntries: readdirSync(home).filter((entry) => entry !== "Library") };
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -62,5 +66,15 @@ describe.skipIf(!existsSync(indexJs))("entry point subcommand routing", () => {
     expect(result.status).toBe(0);
     expect(result.stderr).not.toContain("Unknown command");
     expect(result.stderr).toContain("running on stdio");
+  });
+
+  it("fails fast on an invalid D2L_TRANSPORT value", () => {
+    const result = runWithEnv({ D2L_TRANSPORT: "bogus" });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("Invalid D2L_TRANSPORT");
+
+    const withFlag = runWithEnv({ D2L_TRANSPORT: "bogus" }, "--port", "18765");
+    expect(withFlag.status).toBe(2);
+    expect(withFlag.stderr).toContain("Invalid D2L_TRANSPORT");
   });
 });

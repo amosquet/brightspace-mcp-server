@@ -70,10 +70,34 @@ export interface ChromiumProbe {
   existsSync: (p: string) => boolean;
 }
 
+/** Detect container / WSL runtimes where Chromium requires no-sandbox flags. */
+export function isContainerOrWSL(): boolean {
+  try {
+    if (/microsoft|wsl/i.test(fs.readFileSync("/proc/version", "utf8"))) return true;
+  } catch { /* Not WSL. */ }
+  try {
+    fs.accessSync("/.dockerenv");
+    return true;
+  } catch { /* Not Docker. */ }
+  try {
+    fs.accessSync("/run/.containerenv");
+    return true;
+  } catch { /* Not Podman/OCI container. */ }
+  try {
+    return /docker|containerd|kubepods/.test(fs.readFileSync("/proc/1/cgroup", "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+export function containerLaunchArgs(): string[] {
+  return isContainerOrWSL() ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] : [];
+}
+
 const defaultProbe: ChromiumProbe = {
   async launchHeadless() {
     const { chromium } = await import("playwright");
-    const browser = await chromium.launch({ headless: true, timeout: 30000 });
+    const browser = await chromium.launch({ headless: true, timeout: 30000, args: containerLaunchArgs() });
     await browser.close();
   },
   async executablePath() {

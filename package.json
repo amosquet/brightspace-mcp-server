@@ -1,6 +1,6 @@
 {
   "name": "brightspace-mcp-server",
-  "version": "5.3.5",
+  "version": "5.4.0",
   "mcpName": "io.github.RohanMuppa/brightspace",
   "description": "MCP server for Brightspace (D2L). Check grades, due dates, assignments, announcements, syllabus, rosters and more via Claude, ChatGPT, Cursor, Windsurf, or any MCP client.",
   "type": "module",
@@ -20,6 +20,7 @@
     "build": "tsc",
     "prepublishOnly": "npm run build",
     "start": "node build/index.js",
+    "start:http": "node build/index.js http",
     "auth": "node build/auth-cli.js",
     "update": "node build/update.js",
     "dev": "tsc --watch",

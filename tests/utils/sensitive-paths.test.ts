@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { downloadRootsFromEnv, resetDownloadRootWarnings, sensitiveDestination, sensitiveDestinationMessage } from "../../src/utils/sensitive-paths.js";
+import { configureDestinationPolicy, downloadRootsFromEnv, resetDownloadRootWarnings, sensitiveDestination, sensitiveDestinationMessage } from "../../src/utils/sensitive-paths.js";
 
 const posix = process.platform !== "win32";
 const darwin = process.platform === "darwin";
@@ -10,11 +10,14 @@ const darwin = process.platform === "darwin";
 let home: string;
 let work: string;
 const savedRoots = process.env.D2L_DOWNLOAD_ROOTS;
+const savedSessionDir = process.env.D2L_SESSION_DIR;
 /** The rule as shipped: only `home` is injected, so no machine-specific folder matters. */
 const check = (dir: string) => sensitiveDestination(dir, { home, allowRoots: [] });
 
 beforeEach(async () => {
   delete process.env.D2L_DOWNLOAD_ROOTS;
+  delete process.env.D2L_SESSION_DIR;
+  configureDestinationPolicy({});
   resetDownloadRootWarnings();
   home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "sensitive-home-")));
   work = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "sensitive-work-")));
@@ -22,6 +25,9 @@ beforeEach(async () => {
 afterEach(async () => {
   if (savedRoots === undefined) delete process.env.D2L_DOWNLOAD_ROOTS;
   else process.env.D2L_DOWNLOAD_ROOTS = savedRoots;
+  if (savedSessionDir === undefined) delete process.env.D2L_SESSION_DIR;
+  else process.env.D2L_SESSION_DIR = savedSessionDir;
+  configureDestinationPolicy({});
   vi.restoreAllMocks();
   await fs.rm(home, { recursive: true, force: true });
   await fs.rm(work, { recursive: true, force: true });
@@ -264,5 +270,51 @@ describe("sensitiveDestinationMessage", () => {
     expect(text).toContain("it is inside /etc, a system folder");
     expect(text).toContain("~/Documents/Brightspace");
     expect(text).toContain("D2L_DOWNLOAD_ROOTS");
+  });
+});
+
+describe("session directory protection and root confinement", () => {
+  it("refuses ~/.d2l-session and custom D2L_SESSION_DIR even when D2L_DOWNLOAD_ROOTS covers a parent directory", async () => {
+    const parent = path.join(work, "data");
+    const customSession = path.join(parent, "sessions");
+    await fs.mkdir(customSession, { recursive: true });
+    process.env.D2L_SESSION_DIR = customSession;
+
+    expect(await sensitiveDestination(path.join(home, ".d2l-session", "accounts"), { home, allowRoots: [home] })).toMatch(/session/i);
+    expect(await sensitiveDestination(path.join(customSession, "accounts"), { home, allowRoots: [parent] })).toMatch(/session/i);
+    expect(await sensitiveDestination(path.join(work, "custom-session"), {
+      home,
+      allowRoots: [work],
+      sessionDir: path.join(work, "custom-session"),
+    })).toMatch(/session/i);
+  });
+
+  it("drops D2L_DOWNLOAD_ROOTS entries equal to or inside D2L_SESSION_DIR", async () => {
+    const customSession = path.join(work, "sessions");
+    const subSession = path.join(customSession, "accounts");
+    const safeDownloads = path.join(work, "downloads");
+    await fs.mkdir(subSession, { recursive: true });
+    await fs.mkdir(safeDownloads, { recursive: true });
+    process.env.D2L_SESSION_DIR = customSession;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await downloadRootsFromEnv([customSession, subSession, safeDownloads].join(path.delimiter), home)).toEqual([safeDownloads]);
+    expect(errors).toHaveBeenCalledTimes(2);
+  });
+
+  it("enforces restrictToRoots confinement while still refusing hidden subfolders inside allowed roots", async () => {
+    const safeSub = path.join(work, "Course");
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "sensitive-outside-")));
+    try {
+      configureDestinationPolicy({ restrictToRoots: true, allowRoots: [work] });
+      expect(await sensitiveDestination(safeSub, { home })).toBeNull();
+      expect(await sensitiveDestination(outside, { home })).toMatch(/D2L_DOWNLOAD_ROOTS/);
+      expect(await sensitiveDestination(path.join(work, ".brightspace-sync.json"), { home })).toMatch(/hidden/i);
+
+      configureDestinationPolicy({ restrictToRoots: true, allowRoots: [] });
+      expect(await sensitiveDestination(safeSub, { home })).toMatch(/D2L_DOWNLOAD_ROOTS/);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });

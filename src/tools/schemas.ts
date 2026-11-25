@@ -301,8 +301,8 @@ export const DownloadDropboxSubmissionFileSchema = z.object({
     .describe("Submission ID, from get_dropbox_submissions or get_dropbox_user_submissions."),
   fileId: z.coerce.number().int().positive()
     .describe("File ID within that submission."),
-  downloadPath: z.string().min(1)
-    .describe("Absolute path to an existing local directory where the file should be saved. The directory must already exist; it is not created for you, so create it first if needed."),
+  downloadPath: z.string().min(1).optional()
+    .describe("Absolute path to an existing local directory where the file should be saved. The directory must already exist; it is not created for you, so create it first if needed. Omit in HTTP mode to stage a temporary downloadUrl link instead."),
   customFilename: z.string().max(255).optional()
     .describe("Custom filename for the downloaded file (include extension). If omitted, uses the original submission filename."),
 });

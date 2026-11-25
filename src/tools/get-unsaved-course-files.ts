@@ -12,7 +12,7 @@ import { GetUnsavedCourseFilesSchema } from "./schemas.js";
 import { errorResponse, sanitizeError, toolResponse, FIND_NEW_FILES_GUIDANCE } from "./tool-helpers.js";
 import { log } from "../utils/logger.js";
 import { validateContentId } from "../utils/file-validator.js";
-import { isNetworkOrDevicePath } from "../utils/sensitive-paths.js";
+import { isNetworkOrDevicePath, sensitiveDestination, sensitiveDestinationMessage } from "../utils/sensitive-paths.js";
 import { SyncInputError, planFiles, type Plan } from "../sync/course-sync.js";
 import { readSavedState, type SavedCandidate, type SavedState } from "../sync/saved-topics.js";
 import { CONTENT_ONLY_SCOPE, NOT_COVERED } from "../sync/summary.js";
@@ -151,6 +151,8 @@ export function registerGetUnsavedCourseFiles(server: McpServer, apiClient: D2LA
         if (syncFolder !== undefined) {
           if (isNetworkOrDevicePath(syncFolder)) return errorResponse("syncFolder is a network or device path (starting with \\\\ or //), which is never opened. Use a local folder or a mapped drive letter.", "invalidInput");
           if (!path.isAbsolute(syncFolder)) return errorResponse("syncFolder must be an absolute path.", "invalidInput");
+          const protectedReason = await sensitiveDestination(syncFolder);
+          if (protectedReason) return errorResponse(sensitiveDestinationMessage(syncFolder, protectedReason), "invalidInput");
           try {
             if (!(await fs.stat(syncFolder)).isDirectory()) return errorResponse(`syncFolder is not a folder: ${syncFolder}`, "invalidInput");
           } catch (error) {

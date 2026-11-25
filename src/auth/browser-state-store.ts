@@ -8,10 +8,18 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { BrowserContext } from "playwright";
 import { SessionStoreError } from "../utils/errors.js";
-import { NativeCredentialStoreError } from "./credential-store.js";
+import { hasSessionEncryptionKey, NativeCredentialStoreError } from "./credential-store.js";
 import { readEncryptedRecord, saveEncryptedRecord, trashFile, type SecureStoreOptions } from "./encrypted-store.js";
 
 export type BrowserState = Awaited<ReturnType<BrowserContext["storageState"]>>;
+
+export interface BrowserStateStoreOptions extends SecureStoreOptions {
+  /**
+   * Set only by migrateLegacyState when the session directory had no
+   * encryption key before the locked v1->v2 migration batch started.
+   */
+  legacyUpgradeInProgress?: boolean;
+}
 
 export const BROWSER_STATE_FILE = "storage-state.encrypted.json";
 
@@ -32,14 +40,27 @@ export class BrowserStateStore {
   private readonly file: string;
   private readonly legacyFile: string;
 
-  constructor(private readonly sessionDir: string, private readonly options: SecureStoreOptions = {}) {
+  constructor(private readonly sessionDir: string, private readonly options: BrowserStateStoreOptions = {}) {
     this.file = path.join(sessionDir, BROWSER_STATE_FILE);
     this.legacyFile = path.join(sessionDir, LEGACY_BROWSER_STATE_FILE);
   }
 
   private storeError(action: string, error: unknown): never {
+    if (error instanceof SessionStoreError) throw error;
     if (error instanceof NativeCredentialStoreError) throw error;
     throw new SessionStoreError(`Failed to ${action} browser session. Existing session data was preserved.`, error instanceof Error ? error : new Error(String(error)));
+  }
+
+  /**
+   * Plaintext storage-state.json is only trusted during a one-time migration
+   * before this directory owns an encryption key. Once the key exists, a
+   * plaintext file can only have been planted without access to the key store,
+   * so it must not be adopted or encrypted under the real key.
+   */
+  private async assertLegacyUpgradePending(): Promise<void> {
+    if (this.options.legacyUpgradeInProgress) return;
+    if (!await hasSessionEncryptionKey(this.sessionDir, this.options.backend)) return;
+    throw new SessionStoreError("An old unauthenticated browser session file appeared after this installation was already using native key storage. It was not trusted and was left in place. Sign in again to replace it.");
   }
 
   async load(): Promise<BrowserState | undefined> {
@@ -58,6 +79,7 @@ export class BrowserStateStore {
           throw legacyError;
         }
       }
+      if (legacy) await this.assertLegacyUpgradePending();
       const state = legacy ? JSON.parse(contents) : await readEncryptedRecord(this.sessionDir, JSON.parse(contents), "browser-state", this.options);
       if (!validState(state)) throw new Error("Invalid saved browser state.");
       if (legacy) {

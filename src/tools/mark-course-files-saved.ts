@@ -12,17 +12,21 @@ import { MarkCourseFilesSavedSchema } from "./schemas.js";
 import { errorResponse, sanitizeError, toolResponse } from "./tool-helpers.js";
 import { log } from "../utils/logger.js";
 import { validateContentId } from "../utils/file-validator.js";
-import { isNetworkOrDevicePath } from "../utils/sensitive-paths.js";
+import { isNetworkOrDevicePath, sensitiveDestination } from "../utils/sensitive-paths.js";
 import { planFiles, type Plan } from "../sync/course-sync.js";
 import { ledgerFailureReason, markTopics, unmarkTopics, type LedgerWriteOptions, type MarkItem } from "../sync/saved-topics.js";
 import { diffCourse } from "./get-unsaved-course-files.js";
 
-/** Why a path cannot be recorded, or the size of the file if it can. Network and device paths are refused before any file call. */
+/** Why a path cannot be recorded, or the size of the file if it can. Network, device, and protected paths are refused before any file call. */
 async function checkPath(file: string): Promise<{ size: number } | { reason: string }> {
   if (isNetworkOrDevicePath(file)) {
     return { reason: "a network or device path (starting with \\\\ or //) is never opened; use a local path or a mapped drive letter" };
   }
   if (!path.isAbsolute(file) || file.includes("\u0000")) return { reason: "the path must be absolute" };
+  const protectedReason = (await sensitiveDestination(path.dirname(file))) ?? (await sensitiveDestination(file));
+  if (protectedReason) {
+    return { reason: `the path is in a protected folder (${protectedReason})` };
+  }
   try {
     const stat = await fs.stat(file);
     return stat.isFile() ? { size: stat.size } : { reason: "the path is not a file" };

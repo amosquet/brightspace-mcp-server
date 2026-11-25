@@ -138,6 +138,25 @@ describe("log redaction", () => {
     expect(printed()).toContain("loop");
   });
 
+  it("redacts D2L_* secrets, otpauth URIs, and cloud JSON secret fields", () => {
+    const httpTok = "a".repeat(32);
+    const sessionKey = "b".repeat(32);
+    const totpSeed = "JBSWY3DPEHPK3PXP";
+    log("DEBUG", `D2L_HTTP_TOKEN=${httpTok} D2L_SESSION_KEY=${sessionKey} D2L_PASSWORD=my-pass D2L_TOTP_SECRET=${totpSeed}`);
+    log("DEBUG", `Enrollment otpauth://totp/Purdue:alice?secret=${totpSeed}&issuer=Purdue`);
+    log("DEBUG", "cloud config", {
+      sessionKey,
+      totpUri: `otpauth://totp/Purdue:alice?secret=${totpSeed}`,
+      cookieHeader: "d2lSessionVal=secretcookie; d2lSecureSessionVal=other",
+      passcode: "123456",
+    });
+    const out = printed();
+    for (const secret of [httpTok, sessionKey, "my-pass", totpSeed, "secretcookie", "123456"]) {
+      expect(out).not.toContain(secret);
+    }
+    expect(out).toContain("REDACTED");
+  });
+
   it("still respects the log level", () => {
     setLogLevel("WARN");
     log("INFO", "hidden");

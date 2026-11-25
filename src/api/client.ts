@@ -4,6 +4,7 @@
  * Licensed under MIT — see LICENSE file for details.
  */
 
+import net from "node:net";
 import type { D2LApiClientOptions, ApiVersions, TokenData, ClientStats } from "./types.js";
 import { TTLCache } from "./cache.js";
 import { TokenBucket } from "./rate-limiter.js";
@@ -121,6 +122,60 @@ function touchOnProgress(response: Response, idle: ReturnType<typeof idleTimeout
 
 const LP_VERSION = "{lp}";
 const LE_VERSION = "{le}";
+const MAX_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+function isForbiddenIpv4(a: number, b: number): boolean {
+  return (
+    a === 0 ||
+    a === 10 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a >= 224
+  );
+}
+
+/**
+ * True when a redirect destination hostname names a loopback, private, link-local,
+ * carrier-grade NAT, reserved, or cloud-internal address (SSRF prevention).
+ */
+function isForbiddenRedirectHost(hostname: string): boolean {
+  const clean = hostname.trim().replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
+  if (!clean || clean === "localhost" || clean.endsWith(".localhost") || clean.endsWith(".local") || clean.endsWith(".internal")) {
+    return true;
+  }
+
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(clean);
+  if (ipv4Match) {
+    const octets = ipv4Match.slice(1).map(Number);
+    if (octets.some((n) => n < 0 || n > 255)) return true;
+    return isForbiddenIpv4(octets[0]!, octets[1]!);
+  }
+
+  const ipNoZone = clean.split("%")[0]!;
+  if (net.isIP(ipNoZone) === 6) {
+    // Handle IPv4-mapped IPv6 addresses (WHATWG URL normalizes ::ffff:a.b.c.d to ::ffff:XXXX:XXXX).
+    const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(ipNoZone);
+    if (mappedHex) {
+      const hi = parseInt(mappedHex[1]!, 16);
+      return isForbiddenIpv4((hi >> 8) & 0xff, hi & 0xff);
+    }
+    const mappedDotted = /^::ffff:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ipNoZone);
+    if (mappedDotted) {
+      const octets = mappedDotted.slice(1).map(Number);
+      return isForbiddenIpv4(octets[0]!, octets[1]!);
+    }
+    if (ipNoZone === "::" || ipNoZone === "::1" || /^(?:0{1,4}:){7}0{0,3}[01]$/.test(ipNoZone)) return true;
+    const firstHextet = ipNoZone.split(":")[0]!;
+    if (/^fe[89ab][0-9a-f]*$/.test(firstHextet)) return true; // fe80::/10 link-local
+    if (/^f[cd][0-9a-f]{2}$/.test(firstHextet)) return true; // fc00::/7 unique local
+  }
+
+  return false;
+}
 
 /**
  * D2L API client with authentication, caching, rate limiting, and version discovery.
@@ -375,7 +430,7 @@ export class D2LApiClient {
    * read by a read-only tool is not worth an MFA prompt.
    */
   async getPage(path: string): Promise<string | null> {
-    const response = await this.getPageRaw(path);
+    const response = await this.getPageRaw(path, { sameOriginOnly: true });
     return response ? await response.text() : null;
   }
 
@@ -384,7 +439,7 @@ export class D2LApiClient {
    * file reached through a quickLink or /content/enforced path) is not decoded
    * as text. Same cookie, same origin check, same null on a dead session.
    */
-  async getPageRaw(path: string): Promise<Response | null> {
+  async getPageRaw(path: string, options?: { sameOriginOnly?: boolean }): Promise<Response | null> {
     // The cookie belongs to this Brightspace alone. A path that would make
     // `${baseUrl}${path}` name another host (`@evil.example/`, `.evil.example/`,
     // `//evil.example/`) is refused before the cookie is ever read.
@@ -396,7 +451,7 @@ export class D2LApiClient {
     if (!token?.cookieHeader) return null;
     const cookieToken: TokenData = { ...token, accessToken: `cookie:${token.cookieHeader}` };
     try {
-      return await this.retrying(() => this.throttled(() => this.makeRawRequest(path, cookieToken)));
+      return await this.retrying(() => this.throttled(() => this.makeRawRequest(path, cookieToken, undefined, options)));
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) return null;
       throw error;
@@ -526,17 +581,44 @@ export class D2LApiClient {
     token: TokenData,
     signal?: AbortSignal,
   ): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
+    let currentUrl = `${this.baseUrl}${path}`;
     const headers = this.buildAuthHeaders(token);
+    const requestSignal = signal ? AbortSignal.any([AbortSignal.timeout(this.timeoutMs), signal]) : AbortSignal.timeout(this.timeoutMs);
 
     try {
       log("DEBUG", `Requesting GET ${path}`);
 
-      const response = await fetch(url, {
-        method: "GET",
-        headers,
-        signal: signal ? AbortSignal.any([AbortSignal.timeout(this.timeoutMs), signal]) : AbortSignal.timeout(this.timeoutMs),
-      });
+      let response: Response;
+      let hops = 0;
+      for (;;) {
+        response = await fetch(currentUrl, {
+          method: "GET",
+          headers,
+          redirect: "manual",
+          signal: requestSignal,
+        });
+        if (!REDIRECT_STATUSES.has(response.status)) break;
+        const location = response.headers?.get?.("location") ?? null;
+        if (!location) break;
+        await response.body?.cancel?.().catch(() => {});
+        let nextUrl: URL;
+        try {
+          nextUrl = new URL(location, currentUrl);
+        } catch {
+          throw new NetworkError(`Invalid redirect location from ${path}`);
+        }
+        if (landedOnLogin(nextUrl.href, this.baseUrl)) {
+          throw new ApiError(401, path, `Session expired. Please re-authenticate via ${AUTH_COMMAND}.`);
+        }
+        if (nextUrl.origin !== this.origin || nextUrl.username || nextUrl.password) {
+          throw new NetworkError(`Refused cross-origin redirect from ${path} to ${nextUrl.origin}`);
+        }
+        hops += 1;
+        if (hops > MAX_REDIRECTS) {
+          throw new NetworkError(`Too many redirects while requesting ${path}`);
+        }
+        currentUrl = nextUrl.href;
+      }
       this.recordStatus(response.status, path);
 
       // Preserve cookie material: a 401 only rejects this access token.
@@ -616,21 +698,56 @@ export class D2LApiClient {
     path: string,
     token: TokenData,
     signal?: AbortSignal,
+    options?: { sameOriginOnly?: boolean },
   ): Promise<Response> {
-    const url = `${this.baseUrl}${path}`;
-    const headers = this.buildAuthHeaders(token);
+    let currentUrl = `${this.baseUrl}${path}`;
+    let currentHeaders = this.buildAuthHeaders(token);
     // A file can take far longer than timeoutMs to arrive. Time out on a
     // stall rather than on total duration, for the headers and the body alike.
     const idle = idleTimeout(this.timeoutMs);
+    const requestSignal = signal ? AbortSignal.any([idle.signal, signal]) : idle.signal;
 
     try {
       log("DEBUG", `Requesting GET ${path} (raw)`);
 
-      const response = await fetch(url, {
-        method: "GET",
-        headers,
-        signal: signal ? AbortSignal.any([idle.signal, signal]) : idle.signal,
-      });
+      let response: Response;
+      let hops = 0;
+      for (;;) {
+        response = await fetch(currentUrl, {
+          method: "GET",
+          headers: currentHeaders,
+          redirect: "manual",
+          signal: requestSignal,
+        });
+        if (!REDIRECT_STATUSES.has(response.status)) break;
+        const location = response.headers?.get?.("location") ?? null;
+        if (!location) break;
+        await response.body?.cancel?.().catch(() => {});
+        let nextUrl: URL;
+        try {
+          nextUrl = new URL(location, currentUrl);
+        } catch {
+          throw new NetworkError(`Invalid redirect location from ${path}`);
+        }
+        if (landedOnLogin(nextUrl.href, this.baseUrl)) {
+          throw new ApiError(401, path, `Session expired. Please re-authenticate via ${AUTH_COMMAND}.`);
+        }
+        if (nextUrl.protocol !== "https:" || nextUrl.username || nextUrl.password) {
+          throw new NetworkError(`Refused unsafe redirect from ${path} to ${nextUrl.protocol}//${nextUrl.host}`);
+        }
+        if (nextUrl.origin !== this.origin) {
+          if (options?.sameOriginOnly || isForbiddenRedirectHost(nextUrl.hostname)) {
+            throw new NetworkError(`Refused redirect from ${path} to ${nextUrl.origin}`);
+          }
+          // Strip Brightspace credentials before leaving the configured Brightspace origin (e.g., to CDN/S3).
+          currentHeaders = { "User-Agent": currentHeaders["User-Agent"] };
+        }
+        hops += 1;
+        if (hops > MAX_REDIRECTS) {
+          throw new NetworkError(`Too many redirects while requesting ${path}`);
+        }
+        currentUrl = nextUrl.href;
+      }
       this.recordStatus(response.status, path);
 
       // Preserve cookie material for the shared HTTP refresh path.

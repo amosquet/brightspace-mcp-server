@@ -1,0 +1,30 @@
+services:
+  brightspace-mcp:
+    build: .
+    init: true
+    ports:
+      - "${D2L_HTTP_PORT:-18765}:${D2L_HTTP_PORT:-18765}"
+    environment:
+      D2L_TRANSPORT: http
+      D2L_HTTP_HOST: 0.0.0.0
+      D2L_HTTP_PORT: ${D2L_HTTP_PORT:-18765}
+      D2L_HTTP_TOKEN: ${D2L_HTTP_TOKEN:?Set D2L_HTTP_TOKEN (32+ chars)}
+      # Required if using browser sign-in without an OS keyring (32+ chars)
+      D2L_SESSION_KEY: ${D2L_SESSION_KEY:-}
+      D2L_BASE_URL: ${D2L_BASE_URL:-https://purdue.brightspace.com}
+      D2L_USERNAME: ${D2L_USERNAME:-}
+      D2L_PASSWORD: ${D2L_PASSWORD:-}
+      D2L_TOTP_SECRET: ${D2L_TOTP_SECRET:-}
+      D2L_REMEMBER_MFA: ${D2L_REMEMBER_MFA:-false}
+      D2L_ACCESS_TOKEN: ${D2L_ACCESS_TOKEN:-}
+      D2L_SESSION_COOKIE: ${D2L_SESSION_COOKIE:-}
+      D2L_HTTP_ALLOWED_HOSTS: ${D2L_HTTP_ALLOWED_HOSTS:-*}
+      D2L_HTTP_ALLOWED_ORIGINS: ${D2L_HTTP_ALLOWED_ORIGINS:-*}
+      D2L_SESSION_DIR: /data/sessions
+      D2L_DOWNLOAD_ROOTS: /data/downloads
+    volumes:
+      - brightspace_data:/data
+    restart: unless-stopped
+
+volumes:
+  brightspace_data:

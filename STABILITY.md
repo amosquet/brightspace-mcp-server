@@ -26,8 +26,8 @@ The full description of each command is in [docs/reference/cli.md](docs/referenc
 - **`schedule`** (since 5.3.0, macOS only): `--course`, `--dest`, `--at HH:MM`, `--existing`, `--list`, `--remove`, and exit codes 0, 1 and 2.
 - **`doctor`**: `--json` prints `{checks: [{id, ok, line}], allOk, notes}`. Check ids may be added (4.0.0 added `browser`).
 - **`repair`**: `--json`.
-- **`http`**: since 4.1.0, one shared MCP server over Streamable HTTP on `127.0.0.1` (`/mcp`), default port 18765 (`--port` or `D2L_HTTP_PORT`). Requires `D2L_HTTP_TOKEN` (at least 32 characters) as a bearer token on every request.
-- **No command**: runs the MCP server over stdio. This stays the default.
+- **`http`**: since 4.1.0, one shared MCP server over Streamable HTTP (`/mcp`), defaulting to `127.0.0.1` (`--host` or `D2L_HTTP_HOST`, e.g. `0.0.0.0` for cloud/containers) and port 18765 (`--port`, `D2L_HTTP_PORT`, or `PORT`). Requires `D2L_HTTP_TOKEN` (at least 32 characters) as a bearer token on `/mcp`, and serves `/healthz` and `/health`.
+- **No command**: runs the MCP server over stdio by default (or `http` when `D2L_TRANSPORT=http`).
 
 ## Settings
 

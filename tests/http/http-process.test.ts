@@ -41,7 +41,7 @@ describe.skipIf(!existsSync(entry))("brightspace-mcp-server http (real process)"
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
   });
 
-  function start(port: number, token: string | null = TOKEN) {
+  function start(port: number, token: string | null = TOKEN, extraEnv: Record<string, string> = {}, useTransportEnv = false) {
     const home = mkdtempSync(join(tmpdir(), "bs-http-"));
     homes.push(home);
     const env: NodeJS.ProcessEnv = {
@@ -53,9 +53,11 @@ describe.skipIf(!existsSync(entry))("brightspace-mcp-server http (real process)"
       D2L_BASE_URL: "https://fake-brightspace.test",
       D2L_ACCESS_TOKEN: "fake-upstream-token",
       D2L_NO_UPDATE_CHECK: "1",
+      ...extraEnv,
     };
     if (token) env.D2L_HTTP_TOKEN = token;
-    const child = spawn(process.execPath, [entry, "http", "--port", String(port)], { cwd: home, env, stdio: ["ignore", "pipe", "pipe"] });
+    const args = useTransportEnv ? [entry, "--port", String(port)] : [entry, "http", "--port", String(port)];
+    const child = spawn(process.execPath, args, { cwd: home, env, stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
     const exited = new Promise<number | null>((done) => child.once("close", (code) => done(code)));
     children.push({ child, exited });
@@ -99,5 +101,15 @@ describe.skipIf(!existsSync(entry))("brightspace-mcp-server http (real process)"
     const server = start(await freePort(), null);
     expect(await server.exited).toBe(1);
     expect(server.stderr()).toMatch(/D2L_HTTP_TOKEN is not set/);
+  }, 90_000);
+
+  it("starts in HTTP mode via D2L_TRANSPORT=http and serves /healthz", async () => {
+    const port = await freePort();
+    const server = start(port, TOKEN, { D2L_TRANSPORT: "http" }, true);
+    await server.ready;
+
+    const health = await fetch(`http://127.0.0.1:${port}/healthz`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual({ status: "ok" });
   }, 90_000);
 });

@@ -72,6 +72,7 @@ export class LeidenSSOFlow {
   }
 
   async identifyAccount(page: Page): Promise<boolean> {
+    if (!isMicrosoftEntra(page.url())) return false;
     return this.common.identifyAccount(page);
   }
 

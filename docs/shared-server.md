@@ -40,4 +40,30 @@ Things that change:
 
 Any other MCP client that can connect to a Streamable HTTP URL with a bearer token can share this server. To go back to the automatic shared server, put the `command`/`args` entry back (rerun `setup` and say yes when it offers to switch Codex back) and stop the server you started.
 
+## Running in the cloud (Docker, Fly.io, Railway, Cloud Run, VM)
+
+You can host the server remotely over HTTPS (behind your platform's TLS terminator or a reverse proxy) and connect any remote-capable MCP client to `https://<your-domain>/mcp` with your `D2L_HTTP_TOKEN` bearer token.
+
+1. **Bind all interfaces (`0.0.0.0`) and set secrets:**
+   - `D2L_HTTP_TOKEN` — bearer token (32+ chars) required on `/mcp`.
+   - `D2L_HTTP_HOST=0.0.0.0` (or pass `--host 0.0.0.0`) — listens on all interfaces and defaults `Host`/`Origin` checks to `*` for reverse proxies and browser MCP clients. Restrict them anytime with `D2L_HTTP_ALLOWED_HOSTS` and `D2L_HTTP_ALLOWED_ORIGINS`.
+   - `D2L_HTTP_PORT` (or platform-injected `PORT`, or `--port`) — defaults to `18765`.
+   - `D2L_TRANSPORT=http` — lets `node build/index.js` (or `npx -y brightspace-mcp-server@latest`) start in HTTP mode without passing `http` as an argument.
+   - `D2L_SESSION_KEY` — 32+ character encryption passphrase required when using browser sign-in in a headless container without an OS keychain/keyring to encrypt `session.json` and browser cookies on disk (not needed for `D2L_ACCESS_TOKEN` / `D2L_SESSION_COOKIE` unless saved state already exists).
+   - **Zero-config file downloads (`GET /files/<token>/<filename>`):** Calling `download_file` (omitting `downloadPath`), `get_assignment_files`, `get_announcement_files`, `get_syllabus`, or `download_dropbox_submission_file` automatically returns a short-lived capability `downloadUrl` and `downloadUrlExpiresAt` alongside extracted text/images. Links work directly in a browser without the bearer token, honor `X-Forwarded-Proto: https` when behind TLS, and auto-purge after 30 minutes (or a 500 MB quota) and on shutdown — no host storage configuration required.
+   - `D2L_DOWNLOAD_ROOTS` — optional; only needed if you want bulk disk sync (`download_course_files`) or explicit `downloadPath` writes to persist onto mounted host folders in non-loopback `http` mode (folders inside the session directory are still refused).
+   - Visible browser windows (`sign_in` with `visible: true`) are disabled automatically on non-loopback hosts so sign-in runs headless only.
+   - Brightspace auth: set `D2L_BASE_URL`, `D2L_USERNAME`, `D2L_PASSWORD`, and optionally `D2L_TOTP_SECRET` (or `D2L_REMEMBER_MFA=true`) — or use `D2L_ACCESS_TOKEN` / `D2L_SESSION_COOKIE` for browser-free auth.
+2. **Health checks:** `GET /healthz` and `GET /health` return `200 {"status":"ok"}` (`503` while shutting down) without requiring a bearer token.
+3. **Docker / Docker Compose:**
+   ```bash
+   export D2L_HTTP_TOKEN=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+   export D2L_SESSION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+   export D2L_BASE_URL="https://purdue.brightspace.com"
+   export D2L_USERNAME="your_username"
+   export D2L_PASSWORD="your_password"
+   docker compose up -d --build
+   ```
+   Mount `/data` as a persistent volume so `/data/sessions` (encrypted cookies/tokens) and `/data/downloads` survive container restarts.
+
 Tool and setting reference: [LLMs.md](../LLMs.md). Common problems: [troubleshooting](troubleshooting.md).

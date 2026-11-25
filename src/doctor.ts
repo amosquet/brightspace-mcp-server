@@ -259,8 +259,14 @@ async function checkCredential(
   try {
     const password = await deps.getStoredPassword(baseUrl, username);
     if (password) return pass("credential", "Password saved in your operating system's credential store");
-    return problem("credential", `No saved password found for this account — run this in a terminal: ${signInCommand(baseUrl)}`);
   } catch (error) {
+    try {
+      if (readEnvSecret(deps.env.D2L_PASSWORD, "D2L_PASSWORD")) {
+        return pass("credential", "Password provided via the D2L_PASSWORD environment variable");
+      }
+    } catch {
+      // Fall through to the credential store error reporting below.
+    }
     // On Linux the store itself (secret-tool / an unlocked Secret Service)
     // is usually the problem, and the thrown error already explains that in
     // plain English. Elsewhere, re-running setup is the one fix that covers
@@ -270,6 +276,14 @@ async function checkCredential(
     }
     return problem("credential", `Run this in a terminal to save your password again: ${signInCommand(baseUrl)}`);
   }
+  try {
+    if (readEnvSecret(deps.env.D2L_PASSWORD, "D2L_PASSWORD")) {
+      return pass("credential", "Password provided via the D2L_PASSWORD environment variable");
+    }
+  } catch {
+    // Ignore malformed D2L_PASSWORD here and report missing password below.
+  }
+  return problem("credential", `No saved password found for this account — run this in a terminal: ${signInCommand(baseUrl)}`);
 }
 
 /**

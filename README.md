@@ -174,7 +174,7 @@ All optional. Set them in your AI app's MCP `env` config or in your shell. The f
 
 ## One server for all your chats
 
-Every chat shares one Brightspace server automatically, with one sign-in, one session and one cache. Closing a chat never interrupts another. Codex users, or anyone who wants to run one server themselves, can follow [docs/shared-server.md](docs/shared-server.md).
+Every chat shares one Brightspace server automatically, with one sign-in, one session and one cache. Closing a chat never interrupts another. For a manual localhost server, Docker, or cloud hosting over HTTP, follow [docs/shared-server.md](docs/shared-server.md).
 
 ## Privacy and security
 

@@ -108,4 +108,16 @@ describe("Leiden sign-in entry point", () => {
     expect(login).not.toHaveBeenCalled();
     login.mockRestore();
   });
+
+  it("refuses identifyAccount on non-Entra hosts without touching the page", async () => {
+    const flow = new LeidenSSOFlow({ baseUrl: LEIDEN_URL, username: "u", password: "p" });
+    const wayfPage = fixture(WAYF, []).page;
+    const lookalikePage = fixture("https://login.microsoftonline.com.evil.example/saml2", []).page;
+
+    expect(await flow.identifyAccount(wayfPage as never)).toBe(false);
+    expect(wayfPage.locator).not.toHaveBeenCalled();
+
+    expect(await flow.identifyAccount(lookalikePage as never)).toBe(false);
+    expect(lookalikePage.locator).not.toHaveBeenCalled();
+  });
 });

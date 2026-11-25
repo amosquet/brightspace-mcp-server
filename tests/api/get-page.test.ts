@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { D2LApiClient } from "../../src/api/client.js";
+import { NetworkError } from "../../src/api/errors.js";
 import type { TokenManager } from "../../src/auth/token-manager.js";
 import type { TokenData } from "../../src/types/index.js";
 
@@ -22,12 +23,17 @@ const browserToken = (overrides: Partial<TokenData> = {}): TokenData => ({
   ...overrides,
 });
 
-function makeClient(token: TokenData) {
+function makeClient(token: TokenData, maxAttempts?: number) {
   const fetchMock = vi.fn();
   global.fetch = fetchMock as unknown as typeof fetch;
   const tokenManager = { getToken: vi.fn(async () => token) } as unknown as TokenManager;
   const onAuthExpired = vi.fn(async () => true);
-  const client = new D2LApiClient({ baseUrl: "https://purdue.brightspace.com", tokenManager, onAuthExpired });
+  const client = new D2LApiClient({
+    baseUrl: "https://purdue.brightspace.com",
+    tokenManager,
+    onAuthExpired,
+    retry: maxAttempts !== undefined ? { maxAttempts } : undefined,
+  });
   return { client, fetchMock, onAuthExpired };
 }
 
@@ -155,4 +161,59 @@ describe("D2LApiClient.getPageRaw", () => {
       expect(fetchMock).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("redirect handling in getPage and getPageRaw", () => {
+  const originalFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("follows a same-origin HTTPS redirect in getPage and rejects cross-origin or http downgrades", async () => {
+    const sameOrigin = makeClient(browserToken(), 1);
+    sameOrigin.fetchMock
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "/content/enforced/101-X/real.html" } }))
+      .mockResolvedValueOnce(html("<html>final</html>"));
+    expect(await sameOrigin.client.getPage("/content/enforced/101-X/start.html")).toBe("<html>final</html>");
+    expect(sameOrigin.fetchMock).toHaveBeenCalledTimes(2);
+    expect(sameOrigin.fetchMock.mock.calls[1]?.[0]).toBe("https://purdue.brightspace.com/content/enforced/101-X/real.html");
+
+    const crossOrigin = makeClient(browserToken(), 1);
+    crossOrigin.fetchMock.mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://evil.example/page.html" } }));
+    await expect(crossOrigin.client.getPage("/content/enforced/101-X/start.html")).rejects.toBeInstanceOf(NetworkError);
+    expect(crossOrigin.fetchMock).toHaveBeenCalledTimes(1);
+
+    const downgrade = makeClient(browserToken(), 1);
+    downgrade.fetchMock.mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "http://purdue.brightspace.com/content/enforced/101-X/real.html" } }));
+    await expect(downgrade.client.getPage("/content/enforced/101-X/start.html")).rejects.toBeInstanceOf(NetworkError);
+    expect(downgrade.fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "https://169.254.169.254/latest/meta-data/",
+    "https://127.0.0.1/secret",
+    "https://10.0.0.1/internal",
+    "https://metadata.google.internal/computeMetadata/v1/",
+    "https://[::ffff:169.254.169.254]/latest",
+  ])("blocks getPageRaw redirect to forbidden internal target %s", async (target) => {
+    const { client, fetchMock } = makeClient(browserToken(), 1);
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: target } }));
+    await expect(client.getPageRaw("/content/enforced/101-X/file.pdf")).rejects.toBeInstanceOf(NetworkError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("strips Cookie and Authorization headers when getPageRaw follows a cross-origin HTTPS CDN redirect", async () => {
+    const { client, fetchMock } = makeClient(browserToken(), 1);
+    fetchMock
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://cdn.brightspace.com/file.pdf" } }))
+      .mockResolvedValueOnce(new Response("pdf-bytes", { status: 200 }));
+
+    const res = await client.getPageRaw("/content/enforced/101-X/file.pdf");
+    expect(await res!.text()).toBe("pdf-bytes");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondInit = fetchMock.mock.calls[1]?.[1] as { headers: Record<string, string>; redirect?: string };
+    expect(secondInit.redirect).toBe("manual");
+    expect(secondInit.headers["Cookie"]).toBeUndefined();
+    expect(secondInit.headers["Authorization"]).toBeUndefined();
+  });
 });

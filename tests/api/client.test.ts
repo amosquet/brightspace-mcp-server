@@ -1059,5 +1059,39 @@ describe("D2LApiClient", () => {
       expect(a).toEqual({ ok: true });
       expect(b).toEqual({ ok: true });
     });
+
+    it("rejects cross-origin and http downgrade redirects in API requests", async () => {
+      await mockTokenManager.setToken(createMockToken());
+      const client = new D2LApiClient({
+        baseUrl: "https://purdue.brightspace.com",
+        tokenManager: mockTokenManager,
+        retry: { maxAttempts: 1 },
+      });
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => [
+          { ProductCode: "lp", LatestVersion: "1.56" },
+          { ProductCode: "le", LatestVersion: "1.91" },
+        ],
+        headers: new Headers(),
+      });
+      await client.initialize();
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 302,
+        headers: new Headers({ location: "https://evil.example/api" }),
+      });
+      await expect(client.get("/d2l/api/lp/1.56/users/whoami")).rejects.toBeInstanceOf(NetworkError);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 302,
+        headers: new Headers({ location: "http://purdue.brightspace.com/d2l/api/lp/1.56/users/whoami" }),
+      });
+      await expect(client.get("/d2l/api/lp/1.56/users/whoami")).rejects.toBeInstanceOf(NetworkError);
+    });
   });
 });

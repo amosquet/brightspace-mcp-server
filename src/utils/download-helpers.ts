@@ -201,10 +201,12 @@ export async function secureStreamDownload(options: {
    * not one safe component is refused.
    */
   verbatimName?: boolean;
+  /** Internal only: skip destination checks when staging into the HTTP server's private temp store. */
+  skipDestinationCheck?: boolean;
 }): Promise<{ path: string; size: number; mime: string }> {
-  const { targetDir, filename, originalFilename, body, maxBytes, expectedBytes, replaceExisting, replaceGuard, signal, verbatimName } = options;
+  const { targetDir, filename, originalFilename, body, maxBytes, expectedBytes, replaceExisting, replaceGuard, signal, verbatimName, skipDestinationCheck } = options;
 
-  await assertAllowedDestination(targetDir);
+  if (!skipDestinationCheck) await assertAllowedDestination(targetDir);
   const safeFilename = verbatimName ? verbatimComponent(targetDir, filename) : path.basename(validateDownloadPath(targetDir, filename));
   const partialPath = path.join(targetDir, `.download-${randomUUID()}.part`);
 

@@ -15,6 +15,7 @@ These refusals were added in 5.2.0. Earlier versions accepted these destinations
 - Device paths, `\\?\` and `\\.\`. They skip Windows' own name handling.
 - A filesystem or drive root.
 - The home directory itself. Folders inside it are allowed.
+- The session directory (`~/.d2l-session`, `D2L_SESSION_DIR`, and the active server's session root), so no tool can inspect or overwrite session or key files even when `D2L_DOWNLOAD_ROOTS` includes a parent folder.
 - Any path with a component that starts with `.`, anywhere in the path. Examples: `~/.ssh`, `~/.config`, `project/.git/hooks`.
   **Why:** settings and credentials live in hidden folders. The check runs on the real path, so a link into a hidden folder is refused too.
 - On macOS, `~/Library`, except `~/Library/CloudStorage/**` and `~/Library/Mobile Documents/**`.
@@ -36,9 +37,10 @@ Everything not refused. The code's comments name `/tmp`, `/private/tmp`, `/var/f
 - It is read from the server's own environment. A tool argument cannot set it. See the [settings reference](../reference/settings.md).
   **Why:** the person who runs the server decides what is allowed.
 - It is a list separated by `path.delimiter`: `:` on macOS and Linux, `;` on Windows. Each entry is resolved to its real path.
-- A destination inside an entry is allowed, even where a refusal above would apply. That includes hidden folders and `~/Library`.
-- It cannot allow a device path, a drive root or the home directory itself.
-- These entries are ignored, and a `[config]` warning is logged once per entry: a relative path, a device path, a drive root, the home directory, a folder that contains the home directory, and a path that cannot be resolved.
+- A destination inside an entry is allowed, even where a refusal above would apply. That includes hidden folders and `~/Library`, except the session directory itself.
+- It cannot allow a device path, a drive root, the home directory itself, or the session directory.
+- These entries are ignored, and a `[config]` warning is logged once per entry: a relative path, a device path, a drive root, the home directory, a folder that contains the home directory, a folder inside `D2L_SESSION_DIR`, and a path that cannot be resolved.
+- When the `http` subcommand binds a non-loopback host (`restrictToRoots` via `configureDestinationPolicy`), every destination and course-file path check must fall inside `D2L_DOWNLOAD_ROOTS` (hidden subfolders inside those roots remain refused).
 
 **How the path is judged:**
 
@@ -60,7 +62,15 @@ Everything not refused. The code's comments name `/tmp`, `/private/tmp`, `/var/f
 - `assertAllowedDestination` in `src/utils/download-helpers.ts` runs first in `secureDownload` and in `secureStreamDownload`.
   **Why:** every write to disk starts there, so the rule is enforced once for all tools.
 - Tools that write through these helpers: `download_file`, `download_dropbox_submission_file` and `download_course_files`. The `sync` command also writes through them. `get_syllabus` uses `secureDownload`. The others use `secureStreamDownload`.
+- `download_file`, `download_course_files`, `download_dropbox_submission_file`, `get_syllabus`, `get_unsaved_course_files` (`syncFolder`), and `mark_course_files_saved` (`path`) all check `sensitiveDestination` before calling `fs.stat`.
 - The sync checks the destination before it takes the lock or creates any folder.
+
+### Temporary HTTP download links (`src/http-files.ts`)
+
+- When `http` handles an `/mcp` request, `StagedFileStore` binds an async-local `HttpFileStager` without requiring `D2L_DOWNLOAD_ROOTS` or a `downloadPath` argument.
+- `download_file`, `get_assignment_files`, `get_announcement_files`, `get_syllabus`, and `download_dropbox_submission_file` validate magic bytes via `validateFileType` / `secureStreamDownload`, write into an ephemeral `0700` temp directory (`brightspace-mcp-files-*` under `os.tmpdir()`), and add `downloadUrl` (`GET /files/<token>/<filename>`) and `downloadUrlExpiresAt` to the tool answer.
+- Capabilities are 256-bit random tokens served over `GET`/`HEAD` without requiring `D2L_HTTP_TOKEN`, with `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`, and `Cache-Control: private, no-store`.
+- Staged entries auto-purge after `DEFAULT_FILE_TTL_MS` (30 minutes), evict oldest entries past `DEFAULT_MAX_STAGED_BYTES` (500 MB), clean up stale temp folders at startup, and remove the staging directory on server shutdown.
 
 ## One file: download_file
 

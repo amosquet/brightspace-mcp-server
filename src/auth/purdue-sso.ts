@@ -242,6 +242,26 @@ interface PurdueSSOConfig {
   onMfaHeld?: () => void;
 }
 
+/**
+ * Known Entra-federated school presets. When signing into one of these, never
+ * enter credentials on an arbitrary third-party host.
+ */
+const ENTRA_PRESET_HOSTS = new Set([
+  "purdue.brightspace.com",
+  "brightspace.universiteitleiden.nl",
+  "westernu.brightspace.com",
+  "mycourses2.mcgill.ca",
+]);
+
+function safeHostname(rawUrl: string | undefined): string | null {
+  if (!rawUrl) return null;
+  try {
+    return new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 /** Microsoft expects Purdue's full sign-in name, while setup also accepts a career account. */
 function signInName(username: string, baseUrl?: string): string {
   const isPurdue = baseUrl && new URL(baseUrl).hostname.toLowerCase() === "purdue.brightspace.com";
@@ -289,19 +309,24 @@ export class PurdueSSOFlow {
 
   /** First half of Brightspace Bar's choreography, with no password access. */
   async identifyAccount(page: Page): Promise<boolean> {
-    if (!this.config.username) return false;
-    const email = signInName(this.config.username, this.config.baseUrl);
-    if (!await this.fillWhenReady(page, EMAIL_SELECTORS, email)) return false;
-    // Reached via awaitSilentSSO, a single-page IdP (see enterCredentials)
-    // renders its password field next to the username too. Clicking submit
-    // without filling it first would post an empty password and burn the
-    // attempt, so detect and handle it here the same way.
-    if (this.config.password && await this.hasCoVisiblePassword(page)) {
-      if (!await this.fillWhenReady(page, PASSWORD_SELECTORS, this.config.password)) return false;
+    if (!this.config.username || !this.isTrustedCredentialPage(page)) return false;
+    try {
+      const email = signInName(this.config.username, this.config.baseUrl);
+      if (!await this.fillWhenReady(page, EMAIL_SELECTORS, email)) return false;
+      // Reached via awaitSilentSSO, a single-page IdP (see enterCredentials)
+      // renders its password field next to the username too. Clicking submit
+      // without filling it first would post an empty password and burn the
+      // attempt, so detect and handle it here the same way.
+      if (this.config.password && await this.hasCoVisiblePassword(page)) {
+        if (!await this.fillWhenReady(page, PASSWORD_SELECTORS, this.config.password)) return false;
+      }
+      if (!await this.clickWhenReady(page, SUBMIT_SELECTORS)) return false;
+      this.accountHintSubmitted = true;
+      return true;
+    } catch (error) {
+      if (error instanceof UnsupportedAuthenticationError) return false;
+      throw error;
     }
-    if (!await this.clickWhenReady(page, SUBMIT_SELECTORS)) return false;
-    this.accountHintSubmitted = true;
-    return true;
   }
 
   /**
@@ -356,10 +381,34 @@ export class PurdueSSOFlow {
     // Already on sso.purdue.edu or past the campus selector : nothing to do
   }
 
+  private isTrustedCredentialPage(page: Page): boolean {
+    let current: URL;
+    try {
+      current = new URL(page.url());
+    } catch {
+      return false;
+    }
+    if (current.protocol !== "https:" || current.username || current.password) return false;
+    const baseHost = safeHostname(this.config.baseUrl);
+    if (baseHost && ENTRA_PRESET_HOSTS.has(baseHost)) {
+      const host = current.hostname.toLowerCase();
+      if (host === "login.microsoftonline.com") return true;
+      return baseHost === "purdue.brightspace.com" && (host === "idp.purdue.edu" || host === "sso.purdue.edu");
+    }
+    return true;
+  }
+
+  private assertTrustedCredentialPage(page: Page): void {
+    if (!this.isTrustedCredentialPage(page)) {
+      throw new UnsupportedAuthenticationError("The sign-in page left the trusted HTTPS identity provider before credentials were entered.");
+    }
+  }
+
   private async enterCredentials(page: Page): Promise<void> {
     if (!this.config.username) throw new BrowserAuthError("Username is required for SSO login", "credentials");
     if (!this.config.password && !this.config.passwordless) throw new BrowserAuthError("Password is required for SSO login", "credentials");
 
+    this.assertTrustedCredentialPage(page);
     log("INFO", "Entering credentials");
     // A submitted account hint only counts once Microsoft has actually left the
     // email step. It keeps that field on screen whenever it rejects the hint,
@@ -441,7 +490,10 @@ export class PurdueSSOFlow {
   }
 
   private async fillWhenReady(page: Page, selectors: string[], value: string): Promise<boolean> {
-    return this.actWhenReady(page, selectors, target => target.fill(value));
+    return this.actWhenReady(page, selectors, (target) => {
+      this.assertTrustedCredentialPage(page);
+      return target.fill(value);
+    });
   }
 
   private async clickWhenReady(page: Page, selectors: string[]): Promise<boolean> {

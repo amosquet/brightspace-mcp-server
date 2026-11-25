@@ -1,4 +1,4 @@
-import { deleteStoredPassword, getStoredPassword, getStoredTotpUri, setStoredPassword, setStoredTotpUri } from "../auth/credential-store.js";
+import { deleteStoredPassword, getStoredPassword, getStoredTotpUri, NativeCredentialStoreError, setStoredPassword, setStoredTotpUri } from "../auth/credential-store.js";
 import * as path from "node:path";
 import { acquireProcessLock } from "../auth/auth-lock.js";
 import { normalizeTotpEnrollment } from "../auth/totp.js";
@@ -75,7 +75,22 @@ export async function resolveStoredPassword(
   if (!username) return undefined;
   if (process.env.D2L_PASSWORD) {
     // Environment input is supported, but the application never copies it to a file.
-    await setStoredPassword(baseUrl, username, process.env.D2L_PASSWORD);
+    // In headless containers / cloud VMs with no OS keyring, keep it in memory
+    // instead of failing startup.
+    try {
+      await setStoredPassword(baseUrl, username, process.env.D2L_PASSWORD);
+      return (await getStoredPassword(baseUrl, username)) ?? process.env.D2L_PASSWORD;
+    } catch (error) {
+      if (error instanceof NativeCredentialStoreError) return process.env.D2L_PASSWORD;
+      throw error;
+    }
   }
-  return (await getStoredPassword(baseUrl, username)) ?? undefined;
+  try {
+    return (await getStoredPassword(baseUrl, username)) ?? undefined;
+  } catch (error) {
+    if (error instanceof NativeCredentialStoreError && (process.env.D2L_SESSION_KEY || process.env.D2L_ACCESS_TOKEN || process.env.D2L_SESSION_COOKIE)) {
+      return undefined;
+    }
+    throw error;
+  }
 }

@@ -4,8 +4,18 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer, createRuntime, type ServerRuntime } from "../../src/server.js";
-import { MAX_BODY_BYTES, resolveHttpPort, resolveHttpToken, startHttpServer, type RunningHttpServer } from "../../src/http-server.js";
+import {
+  MAX_BODY_BYTES,
+  resolveAllowedHosts,
+  resolveAllowedOrigins,
+  resolveHttpHost,
+  resolveHttpPort,
+  resolveHttpToken,
+  startHttpServer,
+  type RunningHttpServer,
+} from "../../src/http-server.js";
 import { D2LApiClient } from "../../src/api/client.js";
+import { getDestinationPolicy } from "../../src/utils/sensitive-paths.js";
 import { currentMfaAnnouncer } from "../../src/tools/mfa-relay.js";
 import type { TokenManager } from "../../src/auth/token-manager.js";
 import type { AppConfig } from "../../src/types/index.js";
@@ -312,13 +322,232 @@ describe("shared HTTP server settings", () => {
     expect(resolveHttpToken({ D2L_HTTP_TOKEN: TOKEN })).toBe(TOKEN);
   });
 
-  it("takes the port from --port, then D2L_HTTP_PORT, then the default", () => {
+  it("takes the port from --port, then D2L_HTTP_PORT, then PORT, then the default", () => {
     expect(resolveHttpPort(["node", "index.js", "http"], {})).toBe(18765);
-    expect(resolveHttpPort(["node", "index.js", "http"], { D2L_HTTP_PORT: "4000" })).toBe(4000);
+    expect(resolveHttpPort(["node", "index.js", "http"], { PORT: "8080" })).toBe(8080);
+    expect(resolveHttpPort(["node", "index.js", "http"], { D2L_HTTP_PORT: "4000", PORT: "8080" })).toBe(4000);
     expect(resolveHttpPort(["node", "index.js", "http", "--port", "5000"], { D2L_HTTP_PORT: "4000" })).toBe(5000);
     expect(resolveHttpPort(["node", "index.js", "http", "--port=5001"], {})).toBe(5001);
     for (const bad of ["0", "70000", "abc", ""]) {
       expect(() => resolveHttpPort(["node", "index.js", "http", "--port", bad], {})).toThrow(/Invalid port/);
     }
+  });
+
+  it("takes the host from --host, then D2L_HTTP_HOST, then 127.0.0.1", () => {
+    expect(resolveHttpHost(["node", "index.js", "http"], {})).toBe("127.0.0.1");
+    expect(resolveHttpHost(["node", "index.js", "http"], { D2L_HTTP_HOST: "0.0.0.0" })).toBe("0.0.0.0");
+    expect(resolveHttpHost(["node", "index.js", "http", "--host", "0.0.0.0"], { D2L_HTTP_HOST: "127.0.0.1" })).toBe("0.0.0.0");
+    expect(resolveHttpHost(["node", "index.js", "http", "--host=::1"], {})).toBe("::1");
+    expect(resolveHttpHost(["node", "index.js", "http", "--host=[::1]"], {})).toBe("::1");
+    for (const bad of ["", "bad host", "http://example.com"]) {
+      expect(() => resolveHttpHost(["node", "index.js", "http", "--host", bad], {})).toThrow(/Invalid host/);
+    }
+  });
+
+  it("parses D2L_HTTP_ALLOWED_HOSTS and D2L_HTTP_ALLOWED_ORIGINS", () => {
+    expect(resolveAllowedHosts({})).toBeUndefined();
+    expect(resolveAllowedHosts({ D2L_HTTP_ALLOWED_HOSTS: "*" })).toBe("*");
+    expect(resolveAllowedHosts({ D2L_HTTP_ALLOWED_HOSTS: "App.Fly.Dev, api.example.com:8443 " })).toEqual([
+      "app.fly.dev",
+      "api.example.com:8443",
+    ]);
+    expect(() => resolveAllowedHosts({ D2L_HTTP_ALLOWED_HOSTS: "https://evil.com" })).toThrow(/Invalid D2L_HTTP_ALLOWED_HOSTS/);
+
+    expect(resolveAllowedOrigins({})).toBeUndefined();
+    expect(resolveAllowedOrigins({ D2L_HTTP_ALLOWED_ORIGINS: "*" })).toBe("*");
+    expect(resolveAllowedOrigins({ D2L_HTTP_ALLOWED_ORIGINS: "https://claude.ai, https://chat.openai.com" })).toEqual([
+      "https://claude.ai",
+      "https://chat.openai.com",
+    ]);
+    expect(() => resolveAllowedOrigins({ D2L_HTTP_ALLOWED_ORIGINS: "https://claude.ai/path" })).toThrow(/Invalid D2L_HTTP_ALLOWED_ORIGINS/);
+    expect(() => resolveAllowedOrigins({ D2L_HTTP_ALLOWED_ORIGINS: "javascript:alert(1)" })).toThrow(/Invalid D2L_HTTP_ALLOWED_ORIGINS/);
+  });
+});
+
+describe("cloud HTTP server features (health, reverse proxy hosts, CORS)", { timeout: 30_000 }, () => {
+  let running: RunningHttpServer | undefined;
+  const clients: Client[] = [];
+
+  afterEach(async () => {
+    await Promise.all(clients.splice(0).map((client) => client.close().catch(() => {})));
+    await running?.close();
+    running = undefined;
+  });
+
+  function raw(port: number, options: { method?: string; path?: string; headers?: Record<string, string>; body?: string | Buffer }) {
+    return new Promise<{ status: number; headers: Record<string, unknown>; body: string }>((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port, method: options.method ?? "POST", path: options.path ?? "/mcp", headers: options.headers }, (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }));
+      });
+      req.on("error", reject);
+      req.end(options.body);
+    });
+  }
+
+  const initialize = JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "1" } },
+  });
+
+  it("answers /healthz and /health without auth and reports shutting_down when closing", async () => {
+    running = await startHttpServer({ runtime: createRuntime(config, "test"), token: TOKEN, port: 0 });
+    const getHealthz = await raw(running.port, { method: "GET", path: "/healthz" });
+    expect(getHealthz.status).toBe(200);
+    expect(getHealthz.headers["cache-control"]).toBe("no-store");
+    expect(getHealthz.headers["x-content-type-options"]).toBe("nosniff");
+    expect(JSON.parse(getHealthz.body)).toEqual({ status: "ok" });
+
+    const getHealth = await raw(running.port, { method: "GET", path: "/health" });
+    expect(getHealth.status).toBe(200);
+    expect(JSON.parse(getHealth.body)).toEqual({ status: "ok" });
+
+    const headHealth = await raw(running.port, { method: "HEAD", path: "/healthz" });
+    expect(headHealth.status).toBe(200);
+    expect(headHealth.body).toBe("");
+
+    const postHealth = await raw(running.port, { method: "POST", path: "/healthz" });
+    expect(postHealth.status).toBe(405);
+  });
+
+  it("allows reverse-proxy hosts, CORS preflight, and custom host allowlists in cloud mode", async () => {
+    running = await startHttpServer({
+      runtime: createRuntime(config, "test"),
+      token: TOKEN,
+      host: "0.0.0.0",
+      port: 0,
+    });
+    expect(running.host).toBe("0.0.0.0");
+
+    // CORS preflight succeeds without Authorization when non-loopback defaults to "*"
+    const preflight = await raw(running.port, {
+      method: "OPTIONS",
+      headers: { Host: "brightspace.fly.dev", Origin: "https://claude.ai" },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers["access-control-allow-origin"]).toBe("https://claude.ai");
+
+    // Reverse-proxy Host + Origin succeeds with bearer token
+    const res = await raw(running.port, {
+      headers: {
+        Host: "brightspace.fly.dev",
+        Origin: "https://claude.ai",
+        Authorization: `Bearer ${TOKEN}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: initialize,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe("https://claude.ai");
+    expect(res.headers["cache-control"]).toMatch(/no-(?:store|cache)/);
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+
+    // Origin: null and malformed/non-HTTP origins are still blocked
+    const nullOrigin = await raw(running.port, {
+      headers: { Host: "brightspace.fly.dev", Origin: "null" },
+    });
+    expect(nullOrigin.status).toBe(403);
+    expect(nullOrigin.headers["cache-control"]).toBe("no-store");
+    expect(nullOrigin.headers["x-content-type-options"]).toBe("nosniff");
+    const badOrigin = await raw(running.port, {
+      headers: { Host: "brightspace.fly.dev", Origin: "javascript:alert(1)" },
+    });
+    expect(badOrigin.status).toBe(403);
+
+    await running.close();
+
+    // Explicit host allowlist matches hostname across ports and rejects others
+    running = await startHttpServer({
+      runtime: createRuntime(config, "test"),
+      token: TOKEN,
+      host: "0.0.0.0",
+      port: 0,
+      allowedHosts: ["api.example.com"],
+      allowedOrigins: ["https://claude.ai"],
+    });
+    const allowed = await raw(running.port, {
+      headers: {
+        Host: "api.example.com:443",
+        Origin: "https://claude.ai",
+        Authorization: `Bearer ${TOKEN}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: initialize,
+    });
+    expect(allowed.status).toBe(200);
+
+    const blockedHost = await raw(running.port, {
+      headers: { Host: "evil.example", Origin: "https://claude.ai" },
+    });
+    expect(blockedHost.status).toBe(403);
+
+    const blockedOrigin = await raw(running.port, {
+      headers: { Host: "api.example.com", Origin: "https://evil.example" },
+    });
+    expect(blockedOrigin.status).toBe(403);
+  });
+
+  it("refuses to startHttpServer programmatically with a short or invalid token", async () => {
+    await expect(startHttpServer({
+      runtime: createRuntime(config, "test"),
+      token: "too-short",
+      port: 0,
+    })).rejects.toThrow(/Invalid D2L_HTTP_TOKEN/);
+  });
+
+  it("disables visible browser, enforces root confinement, and sends Connection: close on 401/403 in non-loopback mode", async () => {
+    const runtime = createRuntime({ ...config, envAccessToken: undefined }, "test");
+    const policyBefore = getDestinationPolicy();
+    running = await startHttpServer({
+      runtime,
+      token: TOKEN,
+      host: "0.0.0.0",
+      port: 0,
+    });
+
+    expect(runtime.authRunner!.canOpenVisibleBrowser()).toBe(false);
+    expect(getDestinationPolicy().restrictToRoots).toBe(true);
+
+    const unauthorized = await raw(running.port, {
+      path: "/mcp",
+      headers: {
+        host: `127.0.0.1:${running.port}`,
+        authorization: "Bearer wrong-token",
+        "content-type": "application/json",
+      },
+      body: initialize,
+    });
+    expect(unauthorized.status).toBe(401);
+    expect(String(unauthorized.headers.connection ?? "").toLowerCase()).toBe("close");
+
+    await running.close();
+    running = undefined;
+    expect(runtime.authRunner!.canOpenVisibleBrowser()).toBe(true);
+    expect(getDestinationPolicy()).toEqual(policyBefore);
+  });
+
+  it("sends Connection: close on 403 host/origin rejection", async () => {
+    running = await startHttpServer({
+      runtime: createRuntime(config, "test"),
+      token: TOKEN,
+      host: "127.0.0.1",
+      port: 0,
+    });
+
+    const forbidden = await raw(running.port, {
+      path: "/mcp",
+      headers: {
+        host: "evil.example",
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: initialize,
+    });
+    expect(forbidden.status).toBe(403);
+    expect(String(forbidden.headers.connection ?? "").toLowerCase()).toBe("close");
   });
 });

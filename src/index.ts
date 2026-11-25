@@ -63,10 +63,23 @@ if (subcommand === 'setup') {
   await (await import('./repair.js')).main();
 } else {
   // ── MCP Server ──────────────────────────────────────────────────────
-  // default: stdio, relayed to the one shared runtime, started on demand;
+  // default: stdio, relayed to the one shared runtime, started on demand
+  // (or `http` when D2L_TRANSPORT=http is set for cloud/container runs);
   // `runtime <dir>`: that shared runtime (started by the default command);
-  // `http`: one shared localhost server the user runs and connects to by URL.
-  const mode = subcommand === 'http' ? 'http' : subcommand === 'runtime' ? 'runtime' : 'stdio';
+  // `http`: one shared Streamable HTTP server connected to by URL.
+  (await import("dotenv")).default.config({ quiet: true });
+  const envTransport = process.env.D2L_TRANSPORT?.trim().toLowerCase();
+  if (subcommand !== "http" && subcommand !== "runtime" && envTransport && envTransport !== "stdio" && envTransport !== "http") {
+    process.stderr.write(`Invalid D2L_TRANSPORT=${JSON.stringify(process.env.D2L_TRANSPORT)}: expected "stdio" or "http".\n`);
+    process.exit(2);
+  }
+  const mode = subcommand === 'http'
+    ? 'http'
+    : subcommand === 'runtime'
+      ? 'runtime'
+      : envTransport === 'http'
+        ? 'http'
+        : 'stdio';
 
   // CRITICAL: Enable stdout guard IMMEDIATELY to prevent corruption of stdio transport
   enableStdoutGuard();
@@ -112,9 +125,11 @@ if (subcommand === 'setup') {
       }
 
       const { configureDevActivity } = await import("./utils/dev-activity.js");
+      const { configureDestinationPolicy, getDestinationPolicy } = await import("./utils/sensitive-paths.js");
       const { setActiveShortcuts } = await import("./utils/two-factor-shortcuts.js");
       const { startUpdateChecks } = await import("./utils/update-checker.js");
       const { createRuntime } = await import("./server.js");
+      configureDestinationPolicy({ ...getDestinationPolicy(), sessionDir: config.sessionRoot });
       configureDevActivity(config.sessionDir, { version: PKG_VERSION, role: "server" });
       // Lets the MFA approval message mention the setup options only to users
       // who have neither turned on. Booleans only; the key is never passed.
@@ -155,11 +170,25 @@ if (subcommand === 'setup') {
         process.exit(0);
       }
 
-      const { resolveHttpPort, resolveHttpToken, startHttpServer } = await import("./http-server.js");
-      const running = await startHttpServer({ runtime, token: resolveHttpToken(), port: resolveHttpPort() });
+      const {
+        resolveAllowedHosts,
+        resolveAllowedOrigins,
+        resolveHttpHost,
+        resolveHttpPort,
+        resolveHttpToken,
+        startHttpServer,
+      } = await import("./http-server.js");
+      const running = await startHttpServer({
+        runtime,
+        token: resolveHttpToken(),
+        host: resolveHttpHost(),
+        port: resolveHttpPort(),
+        allowedHosts: resolveAllowedHosts(),
+        allowedOrigins: resolveAllowedOrigins(),
+      });
       stopServing = running.close;
       log("INFO", `Brightspace MCP Server by Rohan Muppa — shared HTTP server listening on ${running.url} (tools and prompts registered)`);
-      log("INFO", "Leave this running; every MCP client on this computer connects to that URL. Press Ctrl+C to stop.");
+      log("INFO", "Leave this running; MCP clients connect to that URL. Press Ctrl+C to stop.");
     } catch (error) {
       log("ERROR", "MCP Server failed to start", error);
       process.exit(1);

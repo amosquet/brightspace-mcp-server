@@ -17,6 +17,7 @@ import { MAX_FILE_SIZE } from "../utils/file-validator.js";
 import { extractPdfText } from "../utils/pdf-extractor.js";
 import { parseContentDispositionFilename } from "./download-file.js";
 import { sensitiveDestination, sensitiveDestinationMessage } from "../utils/sensitive-paths.js";
+import { currentHttpFileStager, type StagedFileLink } from "../http-files.js";
 import { log } from "../utils/logger.js";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -245,6 +246,10 @@ export function registerGetSyllabus(
               "Download path must be an absolute path (e.g., /Users/username/Downloads on Mac or C:\\Users\\username\\Downloads on Windows)", "invalidInput"
             );
           }
+          const protectedReason = await sensitiveDestination(downloadPath);
+          if (protectedReason) {
+            return errorResponse(sensitiveDestinationMessage(downloadPath, protectedReason), "destination");
+          }
           try {
             const stats = await fs.stat(downloadPath);
             if (!stats.isDirectory()) {
@@ -259,10 +264,6 @@ export function registerGetSyllabus(
               );
             }
             throw error;
-          }
-          const protectedReason = await sensitiveDestination(downloadPath);
-          if (protectedReason) {
-            return errorResponse(sensitiveDestinationMessage(downloadPath, protectedReason), "destination");
           }
         }
 
@@ -392,6 +393,16 @@ export function registerGetSyllabus(
           };
         }
 
+        let staged: StagedFileLink | undefined;
+        const stager = currentHttpFileStager();
+        if (attachmentBuffer && stager) {
+          try {
+            staged = await stager.stageBuffer(attachmentBuffer, attachmentFilename, attachmentFilename);
+          } catch (error) {
+            if (!(error instanceof DownloadError)) throw error;
+          }
+        }
+
         log("INFO", `get_syllabus: Retrieved overview for course ${courseId}`);
 
         // Build response
@@ -402,6 +413,11 @@ export function registerGetSyllabus(
           if (totalPages) result.totalPages = totalPages;
         } else {
           result.hasAttachment = hasAttachment;
+        }
+
+        if (staged) {
+          result.downloadUrl = staged.downloadUrl;
+          result.downloadUrlExpiresAt = staged.downloadUrlExpiresAt;
         }
 
         if (attachmentUnreadable) {

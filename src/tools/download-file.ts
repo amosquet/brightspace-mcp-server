@@ -27,6 +27,7 @@ import {
 import { secureStreamDownload, readBodyCapped, expectedLength } from "../utils/download-helpers.js";
 import { DownloadError } from "../utils/download-errors.js";
 import { sensitiveDestination, sensitiveDestinationMessage } from "../utils/sensitive-paths.js";
+import { currentHttpFileStager, type StagedFileLink } from "../http-files.js";
 import { AUTH_COMMAND } from "../utils/commands.js";
 import { parseCoursePath, QUICKLINK_PATH } from "../utils/course-files.js";
 import { extractPdfText } from "../utils/pdf-extractor.js";
@@ -56,9 +57,26 @@ async function waitAtMost(work: Promise<unknown>, ms: number): Promise<void> {
   clearTimeout(timer);
 }
 
-/** The size cap for a download: inline mode buffers the file, disk mode streams it. */
+/** The size cap for a download: inline mode buffers the file (or stages it in HTTP mode), disk mode streams it. */
 function maxFileSize(downloadPath: string | undefined): number {
-  return downloadPath === undefined ? MAX_FILE_SIZE : DISK_MAX_FILE_SIZE;
+  if (downloadPath !== undefined) return DISK_MAX_FILE_SIZE;
+  const stager = currentHttpFileStager();
+  return stager ? Math.max(MAX_FILE_SIZE, stager.maxFileSize) : MAX_FILE_SIZE;
+}
+
+function stagedDownloadResponse(staged: StagedFileLink, originalFilename: string): CallToolResult {
+  const metadata = {
+    mode: "inline",
+    filename: staged.filename,
+    originalFilename,
+    mimeType: staged.mimeType,
+    size: staged.size,
+    representation: "staged_download",
+    downloadUrl: staged.downloadUrl,
+    downloadUrlExpiresAt: staged.downloadUrlExpiresAt,
+    note: `This file is over the ${INLINE_MAX_SIZE / 1024 / 1024}MB inline limit, so it was staged as a temporary download link. Share downloadUrl with the user.`,
+  };
+  return withUpdateNotice([{ type: "text", text: JSON.stringify(metadata) }]);
 }
 
 /** The refusal for a file over its mode's cap, pointing inline callers at disk mode. */
@@ -170,13 +188,21 @@ async function respondInline(
   // to call this itself. Throws DownloadError on an unsupported or
   // undetectable type, handled by the caller's sanitizeError.
   const { mime } = await validateFileType(buffer, undefined, effectiveFilename, originalFilename);
+  const stager = currentHttpFileStager();
+  const staged = stager ? await stager.stageBuffer(buffer, effectiveFilename, originalFilename) : undefined;
 
   const metadata: Record<string, unknown> = {
     mode: "inline",
-    filename: effectiveFilename,
+    filename: staged ? staged.filename : effectiveFilename,
     originalFilename,
     mimeType: mime,
     size: buffer.length,
+    ...(staged
+      ? {
+          downloadUrl: staged.downloadUrl,
+          downloadUrlExpiresAt: staged.downloadUrlExpiresAt,
+        }
+      : {}),
   };
 
   const content: CallToolResult["content"] = [];
@@ -185,8 +211,9 @@ async function respondInline(
     const extracted = await extractPdfText(buffer);
     if (!extracted || !extracted.text) {
       metadata.representation = "pdf_text_extraction_failed";
-      metadata.note =
-        "No text layer found in this PDF (it may be a scan). Re-run with an absolute downloadPath to save the raw file to disk.";
+      metadata.note = staged
+        ? "No text layer found in this PDF (it may be a scan). Share downloadUrl with the user to download the raw file, or pass an absolute downloadPath."
+        : "No text layer found in this PDF (it may be a scan). Re-run with an absolute downloadPath to save the raw file to disk.";
       content.push({ type: "text", text: JSON.stringify(metadata) });
       return withUpdateNotice(content);
     }
@@ -206,7 +233,9 @@ async function respondInline(
       // "can't display inline" path as an unsupported binary format rather
       // than emitting an oversized ImageContent block.
       metadata.representation = "binary_description_only";
-      metadata.note = `This image is too large to inline (${Math.round(buffer.length / 1024 / 1024)}MB, inline image max ${INLINE_IMAGE_MAX_SIZE / 1024 / 1024}MB). Re-run download_file with an absolute downloadPath to save it to disk instead.`;
+      metadata.note = staged
+        ? `This image is too large to inline (${Math.round(buffer.length / 1024 / 1024)}MB, inline image max ${INLINE_IMAGE_MAX_SIZE / 1024 / 1024}MB). Share downloadUrl with the user, or pass an absolute downloadPath.`
+        : `This image is too large to inline (${Math.round(buffer.length / 1024 / 1024)}MB, inline image max ${INLINE_IMAGE_MAX_SIZE / 1024 / 1024}MB). Re-run download_file with an absolute downloadPath to save it to disk instead.`;
       content.push({ type: "text", text: JSON.stringify(metadata) });
       return withUpdateNotice(content);
     }
@@ -220,8 +249,9 @@ async function respondInline(
     const text = officeDocumentText(buffer);
     if (!text) {
       metadata.representation = "office_text_extraction_failed";
-      metadata.note =
-        "No readable text found in this Office document. Re-run with an absolute downloadPath to save the raw file to disk.";
+      metadata.note = staged
+        ? "No readable text found in this Office document. Share downloadUrl with the user to download the raw file, or pass an absolute downloadPath."
+        : "No readable text found in this Office document. Re-run with an absolute downloadPath to save the raw file to disk.";
       content.push({ type: "text", text: JSON.stringify(metadata) });
       return withUpdateNotice(content);
     }
@@ -243,7 +273,9 @@ async function respondInline(
     // EmbeddedResource here would put us back in the PDF-rejection failure
     // mode described above, so this just points the caller at disk mode.
     metadata.representation = "binary_description_only";
-    metadata.note = `This file type (${mime}) cannot be displayed inline. Re-run download_file with an absolute downloadPath to save it to disk instead.`;
+    metadata.note = staged
+      ? `This file type (${mime}) cannot be displayed inline. Share downloadUrl with the user to download it.`
+      : `This file type (${mime}) cannot be displayed inline. Re-run download_file with an absolute downloadPath to save it to disk instead.`;
     content.push({ type: "text", text: JSON.stringify(metadata) });
   }
 
@@ -270,22 +302,41 @@ async function finishDownload(
     return tooLargeResponse(contentLength, downloadPath);
   }
 
+  const effectiveFilename = customFilename || originalFilename;
+  const stager = currentHttpFileStager();
+
   if (downloadPath === undefined) {
+    if (stager && contentLength > INLINE_MAX_SIZE) {
+      if (!response.body) {
+        throw new DownloadError("undetectableType", "File is empty (0 bytes)");
+      }
+      const staged = await stager.stageStream(
+        response.body,
+        effectiveFilename,
+        originalFilename,
+        expectedLength(response)
+      );
+      return stagedDownloadResponse(staged, originalFilename);
+    }
+
     // Content-Length can be missing or understated, so the read itself is
     // capped and stops at the limit rather than buffering the whole body.
+    const readCap = stager ? Math.max(MAX_FILE_SIZE, stager.maxFileSize) : MAX_FILE_SIZE;
     let buffer: Buffer;
     try {
-      buffer = await readBodyCapped(response, MAX_FILE_SIZE);
+      buffer = await readBodyCapped(response, readCap);
     } catch (error) {
       if (error instanceof DownloadError && error.kind === "tooLarge") {
         return tooLargeResponse(null, downloadPath);
       }
       throw error;
     }
+    if (stager && buffer.length > INLINE_MAX_SIZE) {
+      const staged = await stager.stageBuffer(buffer, effectiveFilename, originalFilename);
+      return stagedDownloadResponse(staged, originalFilename);
+    }
     return respondInline(buffer, originalFilename, customFilename);
   }
-
-  const effectiveFilename = customFilename || originalFilename;
 
   if (!response.body) {
     throw new DownloadError("undetectableType", "File is empty (0 bytes)");
@@ -317,6 +368,10 @@ async function finishDownload(
     await waitAtMost(record, RECORD_WAIT_MS);
   }
 
+  const staged = stager && result.size <= stager.maxFileSize
+    ? await stager.stageExistingFile(result.path, path.basename(result.path), result.mime, result.size)
+    : undefined;
+
   return toolResponse({
     mode: "disk",
     success: true,
@@ -325,6 +380,12 @@ async function finishDownload(
     mimeType: result.mime,
     originalFilename,
     message: `File downloaded successfully to ${result.path}`,
+    ...(staged
+      ? {
+          downloadUrl: staged.downloadUrl,
+          downloadUrlExpiresAt: staged.downloadUrlExpiresAt,
+        }
+      : {}),
     ...extensionNote(effectiveFilename, result),
   });
 }
@@ -407,6 +468,11 @@ export function registerDownloadFile(
             );
           }
 
+          const protectedReason = await sensitiveDestination(downloadPath);
+          if (protectedReason) {
+            return errorResponse(sensitiveDestinationMessage(downloadPath, protectedReason), "destination");
+          }
+
           // Validate download directory exists and is a directory
           try {
             const stats = await fs.stat(downloadPath);
@@ -422,10 +488,6 @@ export function registerDownloadFile(
               );
             }
             throw error;
-          }
-          const protectedReason = await sensitiveDestination(downloadPath);
-          if (protectedReason) {
-            return errorResponse(sensitiveDestinationMessage(downloadPath, protectedReason), "destination");
           }
         }
 

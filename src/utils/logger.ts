@@ -48,11 +48,16 @@ function redact(value: string): string {
     /("(?:authorization|cookie|set-cookie)"\s*:\s*")[^"]*(")/gi,
     "$1...REDACTED$2"
   );
+  // otpauth:// enrollment URIs (carry TOTP seeds)
+  value = value.replace(
+    /\botpauth:\/\/[^\s"'`]+/gi,
+    "otpauth://...REDACTED"
+  );
   // JSON-serialized secret fields: {"password":"..."}, {"accessToken":"..."},
   // {"refresh_token":"..."}, {"xsrfToken":"..."}. Only string values match, so
   // a numeric field like "tokenExpiry": 1750000000 is left readable.
   value = value.replace(
-    /("[^"]*(?:password|passwd|secret|token|credential|api[_-]?key)[^"]*"\s*:\s*")[^"]*(")/gi,
+    /("[^"]*(?:password|passwd|passcode|secret|token|credential|api[_-]?key|session[_-]?key|cookie|totp[_-]?uri)[^"]*"\s*:\s*")[^"]*(")/gi,
     "$1...REDACTED$2"
   );
   // Raw header lines: "Cookie: d2lSessionVal=..." / "Set-Cookie: ...".
@@ -65,9 +70,9 @@ function redact(value: string): string {
     (_match, prefix: string, name: string, secret: string) =>
       `${prefix}${name}: ${secret.slice(0, 8)}...REDACTED`
   );
-  // password=... / secret=... in a query string, form body, or free text.
+  // password=... / D2L_PASSWORD=... / secret=... in a query string, form body, env text, or free text.
   value = value.replace(
-    /\b(password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token)\b(\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s&;,"']+)/gi,
+    /\b([a-z0-9_]*?(?:password|passwd|passcode|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|http[_-]?token|session[_-]?key|session[_-]?cookie|totp[_-]?uri))\b(\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s&;,"']+)/gi,
     (_match, key: string, separator: string) => `${key}${separator}...REDACTED`
   );
   // Credentials embedded in a URL: scheme://user:pass@host

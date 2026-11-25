@@ -178,6 +178,22 @@ describe("doctor: (c) credential store", () => {
     expect(check.line).toContain(SETUP_COMMAND);
     expect(check.line).not.toContain("secret-tool");
   });
+
+  it("passes when D2L_PASSWORD is set even if the Linux keyring is unavailable", async () => {
+    const result = await runDoctorChecks(
+      deps({
+        platform: "linux",
+        env: { D2L_PASSWORD: "container-password" },
+        getStoredPassword: async () => {
+          throw new Error("secret-tool unavailable");
+        },
+      })
+    );
+    const check = idOf(result, "credential");
+    expect(check.ok).toBe(true);
+    expect(check.line).toContain("D2L_PASSWORD");
+    expect(check.line).not.toContain("container-password");
+  });
 });
 
 describe("doctor: (d) school URL reachability", () => {

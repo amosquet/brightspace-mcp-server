@@ -33,6 +33,8 @@ const WINDOW_JOINED =
   "No window was opened: a sign-in was already running, and this call joined it.";
 const NEEDS_PASSWORD_FOR_HEADLESS =
   `No password is saved on this computer, so a sign-in with no window has nothing to type into the school's form and would only wait and time out. Either call sign_in again with visible true, or tell the user to run \`${SETUP_COMMAND}\` to save one.`;
+const NO_REMOTE_WINDOW =
+  "Cannot open a browser window on this server: it is running remotely over HTTP without a local screen. Call sign_in again without visible to sign in with the server's saved credentials.";
 
 /**
  * A sign-in still working is progress, not a failure, so these are not marked
@@ -77,7 +79,7 @@ export function registerSignIn(
   server: McpServer,
   config: AppConfig,
   tokenManager: Pick<TokenManager, "getToken" | "isValid">,
-  authRunner?: Pick<AuthRunner, "run" | "busy" | "requestVisibleBrowser">
+  authRunner?: Pick<AuthRunner, "run" | "busy" | "requestVisibleBrowser"> & { canOpenVisibleBrowser?: () => boolean }
 ): void {
   server.registerTool(
     "sign_in",
@@ -106,8 +108,11 @@ export function registerSignIn(
       // school's flow decides. A passwordless account keeps no password yet
       // signs in without a window (the phone approves it).
       const canSignInHeadless = createSSOFlow(config).hasCredentials();
+      const canOpenWindow = authRunner.canOpenVisibleBrowser?.() ?? true;
+      if (visible === true && !canOpenWindow) return text(NO_REMOTE_WINDOW, true);
       // A window only when a headless sign-in could not work anyway.
       const wantWindow = visible ?? !canSignInHeadless;
+      if (!canOpenWindow && !canSignInHeadless) return text(NEEDS_PASSWORD_FOR_HEADLESS, true);
       // A joined sign-in keeps the mode it started with, so asking would only
       // promise the user a window that never appears.
       const windowOpened = wantWindow && !authRunner.busy();

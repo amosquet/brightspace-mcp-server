@@ -137,11 +137,12 @@ schedule --remove --course <id>
 
 ## http
 
-`src/http-server.ts`. Opt-in: one shared Streamable HTTP server at `http://127.0.0.1:18765/mcp` for every client on the computer, instead of the automatic shared runtime.
+`src/http-server.ts`. Opt-in: one shared Streamable HTTP server (default `http://127.0.0.1:18765/mcp` locally, or `0.0.0.0` in cloud/container deployments) instead of the automatic shared runtime.
 
-- Needs `D2L_HTTP_TOKEN`. Takes `--port` (or `D2L_HTTP_PORT`).
-- The person starts it and keeps it running. Clients connect by URL and never start it. A second copy on a taken port exits with an error.
-- Ctrl+C lets calls in progress finish.
+- Needs `D2L_HTTP_TOKEN`. Takes `--host` (or `D2L_HTTP_HOST`) and `--port` (or `D2L_HTTP_PORT`, then `PORT`). `D2L_TRANSPORT=http` also starts HTTP mode when no subcommand is given.
+- Exposes `POST /mcp` (with CORS `OPTIONS` preflight) and unauthenticated `GET /healthz` / `GET /health` health checks.
+- The person or platform starts it and keeps it running. Clients connect by URL and never start it. A second copy on a taken port exits with an error.
+- Ctrl+C / SIGTERM lets calls in progress finish.
 
 Setup steps are in [docs/shared-server.md](../shared-server.md).
 

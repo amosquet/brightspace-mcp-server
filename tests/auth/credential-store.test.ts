@@ -127,4 +127,44 @@ describe("Credential store", () => {
     }
     expect(await nativeCredentialBackend.getPassword(service, account)).toBeNull();
   }, 30_000);
+
+  it("derives a deterministic session encryption key from D2L_SESSION_KEY without touching the native keyring", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "env-session-key-"));
+    try {
+      vi.stubEnv("D2L_SESSION_KEY", "k".repeat(32));
+      const spy = vi.spyOn(nativeCredentialBackend, "getPassword");
+      const first = await getSessionEncryptionKey(root);
+      const second = await getSessionEncryptionKey(root);
+      expect(first).toEqual(second);
+      expect(first).toHaveLength(32);
+      expect(await hasSessionEncryptionKey(root)).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+
+      vi.stubEnv("D2L_SESSION_KEY", "too-short");
+      await expect(getSessionEncryptionKey(root)).rejects.toThrow(/at least 32 characters/);
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails instead of writing a plaintext key file when the native keyring is unavailable without D2L_SESSION_KEY", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "no-file-session-key-"));
+    try {
+      vi.stubEnv("D2L_SESSION_KEY", "");
+      vi.stubEnv("D2L_HTTP_TOKEN", "t".repeat(32));
+      vi.stubEnv("D2L_PASSWORD", "env-secret");
+      vi.spyOn(nativeCredentialBackend, "getPassword").mockRejectedValue(new NativeCredentialStoreError("no keyring"));
+      vi.spyOn(nativeCredentialBackend, "setPassword").mockRejectedValue(new NativeCredentialStoreError("no keyring"));
+
+      await expect(getSessionEncryptionKey(root)).rejects.toBeInstanceOf(NativeCredentialStoreError);
+      await expect(hasSessionEncryptionKey(root)).rejects.toBeInstanceOf(NativeCredentialStoreError);
+      expect(await fs.readdir(root)).toEqual([]);
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });

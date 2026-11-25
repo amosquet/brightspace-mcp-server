@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { BrowserStateStore } from "../../src/auth/browser-state-store.js";
 import { NativeCredentialStoreError } from "../../src/auth/credential-store.js";
+import { SessionStoreError } from "../../src/utils/errors.js";
 import { MemoryCredentialBackend, retireTestFile, testBrowserState } from "./secure-store-fixtures.js";
 
 describe("BrowserStateStore", () => {
@@ -68,7 +69,7 @@ describe("BrowserStateStore", () => {
     await fs.writeFile(file, JSON.stringify(record));
     await expect(store.load()).rejects.toThrow();
     expect(await fs.readFile(file, "utf8")).toBe(JSON.stringify(record));
-    await expect(fs.access(path.join(dir, "storage-state.json"))).resolves.toBeUndefined();
+    await expect(fs.access(path.join(dir, "storage-state.json"))).resolves.toBeFalsy();
   });
 
   it("returns undefined only when state has never been saved", async () => {
@@ -92,5 +93,29 @@ describe("BrowserStateStore", () => {
     await expect(store.save(testBrowserState)).rejects.toBeInstanceOf(NativeCredentialStoreError);
     expect(await fs.readFile(file, "utf8")).toBe(original);
     expect(backend.writes).toBe(1);
+  });
+
+  it("refuses a plaintext storage-state.json planted after native key storage already exists", async () => {
+    await store.save(testBrowserState);
+    await fs.rm(path.join(dir, "storage-state.encrypted.json"));
+    const legacyFile = path.join(dir, "storage-state.json");
+    await fs.writeFile(legacyFile, JSON.stringify(testBrowserState));
+
+    await expect(store.load()).rejects.toBeInstanceOf(SessionStoreError);
+    expect(await fs.readFile(legacyFile, "utf8")).toBe(JSON.stringify(testBrowserState));
+    await expect(fs.access(path.join(dir, "storage-state.encrypted.json"))).rejects.toThrow();
+  });
+
+  it("refuses a plaintext storage-state.json when D2L_SESSION_KEY is configured", async () => {
+    const saved = process.env.D2L_SESSION_KEY;
+    process.env.D2L_SESSION_KEY = "k".repeat(32);
+    try {
+      const legacyFile = path.join(dir, "storage-state.json");
+      await fs.writeFile(legacyFile, JSON.stringify(testBrowserState));
+      await expect(new BrowserStateStore(dir, { trash: retireTestFile }).load()).rejects.toBeInstanceOf(SessionStoreError);
+    } finally {
+      if (saved === undefined) delete process.env.D2L_SESSION_KEY;
+      else process.env.D2L_SESSION_KEY = saved;
+    }
   });
 });

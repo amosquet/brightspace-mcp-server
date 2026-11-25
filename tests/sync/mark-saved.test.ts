@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { registerDownloadFile, settleSavedTopicRecords } from "../../src/tools/download-file.js";
 import { registerGetUnsavedCourseFiles } from "../../src/tools/get-unsaved-course-files.js";
@@ -268,6 +269,34 @@ describe("network and device paths are never accepted (review 1)", () => {
     }
     const posixUnc = await unsaved().call({ courseId: COURSE, syncFolder: "//attacker/share" });
     expect(posixUnc.content[0].text).toMatch(/network or device path/i);
+  });
+
+  it("refuses protected directories for mark_course_files_saved path and get_unsaved_course_files syncFolder before statting", async () => {
+    fake = await fakeBrightspace(toc, bodies);
+    const statSpy = vi.spyOn(fs, "stat");
+    const protectedFile = path.join(os.homedir(), ".ssh", "nonexistent.pdf");
+    const sessionFile = path.join(os.homedir(), ".d2l-session", "session.json");
+
+    const markResult = json(await mark().call({
+      courseId: COURSE,
+      topics: [
+        { topicId: 10, path: protectedFile },
+        { topicId: 12, path: sessionFile },
+      ],
+    }));
+    expect(markResult.marked).toEqual([]);
+    expect(markResult.refused).toHaveLength(2);
+    expect(markResult.refused[0].reason).toMatch(/hidden|protected|session/i);
+    expect(markResult.refused[1].reason).toMatch(/hidden|protected|session/i);
+
+    const unsavedSsh = await unsaved().call({ courseId: COURSE, syncFolder: path.join(os.homedir(), ".ssh") });
+    expect(unsavedSsh.isError).toBe(true);
+    expect(unsavedSsh.content[0].text).toMatch(/hidden|D2L_DOWNLOAD_ROOTS/i);
+
+    const unsavedSession = await unsaved().call({ courseId: COURSE, syncFolder: path.join(os.homedir(), ".d2l-session") });
+    expect(unsavedSession.isError).toBe(true);
+    expect(unsavedSession.content[0].text).toMatch(/session|D2L_DOWNLOAD_ROOTS/i);
+    statSpy.mockRestore();
   });
 });
 

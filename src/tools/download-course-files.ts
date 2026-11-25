@@ -12,6 +12,7 @@ import { log } from "../utils/logger.js";
 import { validateContentId } from "../utils/file-validator.js";
 import { SyncInputError, syncCourse } from "../sync/course-sync.js";
 import { summarizeSync, CONTENT_ONLY_SCOPE } from "../sync/summary.js";
+import { sensitiveDestination, sensitiveDestinationMessage } from "../utils/sensitive-paths.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 
@@ -44,6 +45,10 @@ export function registerDownloadCourseFiles(server: McpServer, apiClient: D2LApi
           return errorResponse(
             "Download path must be an absolute path (e.g., /Users/username/Downloads on Mac or C:\\Users\\username\\Downloads on Windows)", "invalidInput"
           );
+        }
+        const protectedReason = await sensitiveDestination(downloadPath);
+        if (protectedReason) {
+          return errorResponse(sensitiveDestinationMessage(downloadPath, protectedReason), "invalidInput");
         }
         try {
           if (!(await fs.stat(downloadPath)).isDirectory()) {

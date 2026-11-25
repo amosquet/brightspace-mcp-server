@@ -275,6 +275,22 @@ describe("PurdueSSOFlow credential choreography ported from Brightspace Bar", ()
     expect(form.actions).toEqual([]);
     expect(form.page.locator).not.toHaveBeenCalled();
   });
+
+  it("refuses non-HTTPS pages and untrusted IdP hosts for Entra presets without filling credentials", async () => {
+    const httpForm = makePage();
+    httpForm.page.url = () => "http://login.microsoftonline.com/common/login";
+    await expect(enterCredentials(new PurdueSSOFlow({ baseUrl: PURDUE, username: USERNAME, password: PASSWORD }), httpForm.page))
+      .rejects.toBeInstanceOf(UnsupportedAuthenticationError);
+    expect(httpForm.actions).toEqual([]);
+    expect(httpForm.page.locator).not.toHaveBeenCalled();
+
+    const evilForm = makePage();
+    evilForm.page.url = () => "https://evil.example/login";
+    await expect(enterCredentials(new PurdueSSOFlow({ baseUrl: PURDUE, username: USERNAME, password: PASSWORD }), evilForm.page))
+      .rejects.toBeInstanceOf(UnsupportedAuthenticationError);
+    expect(evilForm.actions).toEqual([]);
+    expect(evilForm.page.locator).not.toHaveBeenCalled();
+  });
 });
 
 describe("PurdueSSOFlow passwordless sign-in", () => {

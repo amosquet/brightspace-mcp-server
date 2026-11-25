@@ -199,6 +199,7 @@ Tools are registered in `src/tools/index.ts`, and their input schemas are in `sr
   - `extractText` (default `true`). Works for PDF, DOCX, XLSX, PPTX and plain text.
   - `maxChars` (default 12000, max 100000). The response reports whether the text was truncated.
 - Assignment files currently truncate extracted text without continuation.
+- When running over `http`, reading an assignment file also stages it and adds a short-lived `downloadUrl` and `downloadUrlExpiresAt`.
 - Each attachment carries `downloadArgs`. Pass these to `download_file` to save the original handout. See [download_file](#download_file).
 
 ### get_rubrics_for_object
@@ -253,6 +254,7 @@ Tools are registered in `src/tools/index.ts`, and their input schemas are in `sr
   - `extractText` (default `true`). Works for PDF, DOCX, XLSX, PPTX and plain text.
   - `maxChars` (default 12000, max 100000).
 - Read-only.
+- When running over `http`, reading an announcement file also stages it and adds a short-lived `downloadUrl` and `downloadUrlExpiresAt`.
 - To download an attachment, use `download_file` with `newsId` and `fileId`.
 
 ### get_discussions
@@ -325,7 +327,7 @@ Tools are registered in `src/tools/index.ts`, and their input schemas are in `sr
 - Arguments:
   - `courseId` (required).
   - `downloadPath` (optional). An absolute path to an existing directory where the attachment is saved. See [Writing to disk](#writing-to-disk).
-- Returns the syllabus document for a course.
+- Returns the syllabus document for a course. When running over `http` and an attachment exists, it also includes a short-lived `downloadUrl` and `downloadUrlExpiresAt`.
 
 ### get_video_transcript
 
@@ -384,7 +386,7 @@ Tools are registered in `src/tools/index.ts`, and their input schemas are in `sr
     - The file is fetched with the saved web session, so it needs a signed-in session.
   - `downloadPath` (optional). Omit it for an inline result. Give an absolute path to an existing host directory to save the file to disk. See [Writing to disk](#writing-to-disk).
   - `customFilename` (optional, max 255 characters). Include the extension. The default is the original Brightspace filename.
-- Result field `mode` is `"inline"` or `"disk"`. A disk result has the same JSON shape as before, with `mode: "disk"` added.
+- Result field `mode` is `"inline"` or `"disk"`. A disk result has the same JSON shape as before, with `mode: "disk"` added. Over `http`, results also include a short-lived `downloadUrl` and `downloadUrlExpiresAt`, and inline files over 10MB fall back to `representation: "staged_download"` instead of failing.
 - Inline result:
   - PDFs and `.docx`, `.xlsx` and `.pptx` files return extracted text.
   - `jpeg`, `png`, `gif` and `webp` images return an image block.
@@ -640,9 +642,9 @@ These tools are read-only views of a course's dropbox folders. Most of them are 
   - `folderId` (required).
   - `submissionId` (required). From `get_dropbox_submissions` or `get_dropbox_user_submissions`.
   - `fileId` (required). A file ID within that submission.
-  - `downloadPath` (required). An absolute path to an existing directory. See [Writing to disk](#writing-to-disk).
+  - `downloadPath` (optional; required outside `http`). An absolute path to an existing directory. See [Writing to disk](#writing-to-disk).
   - `customFilename` (optional, max 255 characters). The default is the original submission filename.
-- Always saves to disk.
+- Saves to disk when `downloadPath` is passed, or stages a temporary `downloadUrl` (`mode: "staged"`) when omitted over `http`.
 - It streams through `secureStreamDownload` (`src/utils/download-helpers.ts`).
 - The 2GB cap is `DISK_MAX_FILE_SIZE` (`src/utils/file-validator.ts`). The cap is checked against three values: the listed size, the `Content-Length`, and the bytes actually received.
 - Staff-only.

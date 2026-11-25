@@ -31,6 +31,7 @@ Every setting the server reads, and every file it keeps on disk. The handful a s
 | `D2L_ACCESS_TOKEN` | none | Pre-issued Bearer token; skips the browser ([how](../internals/sign-in.md)) |
 | `D2L_SESSION_COOKIE` | none | Pasted `d2lSessionVal`/`d2lSecureSessionVal` cookies; skips the browser ([how](../internals/sign-in.md)) |
 | `D2L_SESSION_DIR` | `~/.d2l-session` | Root of the per-account session directories. `~` is expanded |
+| `D2L_SESSION_KEY` | none | Encryption passphrase (32+ chars) for `session.json` and browser state in cloud/container runs without an OS credential store |
 | `D2L_TOKEN_TTL` | `3600` | Seconds an access token is used before it is re-minted. Must be a whole positive number; anything else is ignored with a warning |
 
 ### Courses
@@ -50,9 +51,10 @@ Every setting the server reads, and every file it keeps on disk. The handful a s
 
 More on `D2L_DOWNLOAD_ROOTS`:
 
-- Each entry is realpath'd. A destination inside one is allowed even where the built-in refusals would say no, including a hidden or `~/Library` folder inside home.
+- Each entry is realpath'd. A destination inside one is allowed even where the built-in refusals would say no, including a hidden or `~/Library` folder inside home, except the session directory (`D2L_SESSION_DIR` / `~/.d2l-session`).
 - It is read from the server's own environment, which a tool argument cannot set.
-- A relative entry, a device path, a drive root, the home folder itself, or a folder that holds the home folder is ignored with a `[config]` warning.
+- A relative entry, a device path, a drive root, the home folder itself, a folder that holds the home folder, or a folder inside the session directory is ignored with a `[config]` warning.
+- When `http` binds a non-loopback host, disk downloads and course-file path checks are confined exclusively to `D2L_DOWNLOAD_ROOTS`.
 - The refusal text names this setting (`src/utils/sensitive-paths.ts`). The refusals themselves are in [docs/internals/downloads.md](../internals/downloads.md).
 
 ### Server
@@ -63,8 +65,12 @@ More on `D2L_DOWNLOAD_ROOTS`:
 | `D2L_NOTIFY` | on (macOS) | `0`, `false`, `no` or `off` turns off system notifications: the sign-in approval number and `sync --notify`. Other platforms do nothing |
 | `D2L_DEV_MODE` | unset | Exactly `true` writes a local, content-free activity log ([docs/dev-mode.md](../dev-mode.md)) |
 | `D2L_RUNTIME_IDLE_SECONDS` | `600` | Default command only: seconds the shared runtime waits with no request in progress before stopping |
-| `D2L_HTTP_TOKEN` | none | `http` only, and required there: the bearer token every request to the shared server must carry. At least 32 characters; never logged ([docs/shared-server.md](../shared-server.md)) |
-| `D2L_HTTP_PORT` | `18765` | `http` only: the port on 127.0.0.1. `--port` overrides it |
+| `D2L_TRANSPORT` | `stdio` | Default transport when no subcommand is given: `stdio` or `http` (for containers/cloud platforms) |
+| `D2L_HTTP_TOKEN` | none | `http` only, and required there: the bearer token every request to `/mcp` must carry. At least 32 characters; never logged ([docs/shared-server.md](../shared-server.md)) |
+| `D2L_HTTP_HOST` | `127.0.0.1` | `http` only: interface to bind (`0.0.0.0` for cloud/containers). `--host` overrides it |
+| `D2L_HTTP_PORT` | `18765` | `http` only: the HTTP port (`--port` overrides it, then `D2L_HTTP_PORT`, then `PORT`, then `18765`) |
+| `D2L_HTTP_ALLOWED_HOSTS` | loopback only (`127.0.0.1` / `localhost`) or `*` on non-loopback hosts | `http` only: comma-separated `Host` header allowlist (e.g. `my-app.fly.dev`) or `*` |
+| `D2L_HTTP_ALLOWED_ORIGINS` | loopback only or `*` on non-loopback hosts | `http` only: comma-separated `Origin` header allowlist (e.g. `https://claude.ai`) or `*` |
 
 Notification text never holds a password, cookie, token or code. It holds only the text it needs (`src/utils/notify.ts`): a 1 to 3 digit approval number; or a file count with `Course <id>` or the course's name (text the instructor wrote, cut short, and left out when it reads like a sign-in prompt) and the name of the destination folder. Notifications go only to macOS; nothing is sent over the network.
 

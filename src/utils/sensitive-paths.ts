@@ -27,13 +27,22 @@ export interface DestinationPolicy {
   home?: string;
   /** Extra allowed roots, with the same standing as D2L_DOWNLOAD_ROOTS. For tests. */
   allowRoots?: string[];
+  /** The server's session directory (or root). Always refused, even under D2L_DOWNLOAD_ROOTS. */
+  sessionDir?: string;
+  /** When true (non-loopback HTTP mode), only destinations inside allowRoots / D2L_DOWNLOAD_ROOTS are allowed. */
+  restrictToRoots?: boolean;
 }
 
 let configured: DestinationPolicy = {};
 
-/** Set the policy for this process. Only tests call it: production uses the defaults. */
+/** Set the policy for this process. Production uses it to lock down remote HTTP mode and protect the session directory. */
 export function configureDestinationPolicy(policy: DestinationPolicy): void {
   configured = policy;
+}
+
+/** Return the active destination policy. */
+export function getDestinationPolicy(): DestinationPolicy {
+  return { ...configured };
 }
 
 // The native variant expands Windows 8.3 short names; fs/promises has none.
@@ -162,16 +171,54 @@ async function refusedByRules(real: string, home: string): Promise<string | null
   return null;
 }
 
+function expandHome(raw: string, home: string): string {
+  if (raw === "~") return home;
+  if (raw.startsWith("~/") || raw.startsWith("~\\")) return path.join(home, raw.slice(2));
+  if (raw.startsWith("~")) return path.join(home, raw.slice(1));
+  return raw;
+}
+
+/**
+ * Resolved real paths of active session directories that must never receive
+ * downloaded files, even if listed under D2L_DOWNLOAD_ROOTS or inside a
+ * broader allowed root such as /data.
+ */
+async function resolveSessionDirs(policy: DestinationPolicy, home: string, realHome: string): Promise<string[]> {
+  const candidates = [
+    policy.sessionDir,
+    process.env.D2L_SESSION_DIR,
+    path.join(home, ".d2l-session"),
+  ];
+  const resolved: string[] = [];
+  for (const raw of candidates) {
+    const trimmed = raw?.trim();
+    if (!trimmed) continue;
+    const expanded = expandHome(trimmed, home);
+    if (!path.isAbsolute(expanded) || DEVICE_PREFIX.test(expanded)) continue;
+    try {
+      const real = await resolveReal(expanded);
+      if (path.parse(real).root === real || fold(real) === fold(realHome) || below(realHome, real) !== null) continue;
+      if (!resolved.some((existing) => fold(existing) === fold(real))) resolved.push(real);
+    } catch {
+      // Unresolvable entry cannot be matched; ignore it here.
+    }
+  }
+  return resolved;
+}
+
 /**
  * Why `dir` may not be a download destination, or null when it may. Refused:
- * device paths, a drive root, the home folder itself, any path that goes
+ * device paths, a drive root, the home folder itself, the server's session
+ * directory (D2L_SESSION_DIR or ~/.d2l-session), any path that goes
  * through a hidden (dot) folder, ~/Library (except CloudStorage and Mobile
  * Documents), system folders (/etc, /usr, /bin, /sbin, /System, /Library,
  * /Applications, /boot, /dev, /proc, /sys, /lib*, /var apart from its temp
  * folders, /root, and on Windows or under WSL Windows, Program Files,
- * ProgramData and AppData). A destination inside a root listed in
- * D2L_DOWNLOAD_ROOTS is allowed even where those rules would refuse it,
- * but never a device path, a drive root or the home folder itself.
+ * ProgramData and AppData). When restrictToRoots is true (non-loopback HTTP),
+ * only non-hidden subfolders of D2L_DOWNLOAD_ROOTS are allowed. Otherwise a
+ * destination inside D2L_DOWNLOAD_ROOTS is allowed even where the soft rules
+ * above would refuse it, but never the session directory, a device path, a
+ * drive root, or the home folder itself.
  */
 export async function sensitiveDestination(dir: string, options: DestinationPolicy = {}): Promise<string | null> {
   if (DEVICE_PREFIX.test(dir)) return REFUSED_DEVICE;
@@ -180,12 +227,37 @@ export async function sensitiveDestination(dir: string, options: DestinationPoli
     const real = await resolveReal(dir);
     if (DEVICE_PREFIX.test(real)) return REFUSED_DEVICE;
     if (path.parse(real).root === real) return REFUSED_ROOT;
-    const realHome = await resolveReal(policy.home ?? os.homedir());
+    const home = policy.home ?? os.homedir();
+    const realHome = await resolveReal(home);
     if (fold(real) === fold(realHome)) return REFUSED_HOME;
 
-    const operatorRoots = [...(policy.allowRoots ?? []), ...(await downloadRootsFromEnv(undefined, policy.home))];
+    // The server's session directory is never a valid download destination,
+    // even when D2L_SESSION_DIR is a non-hidden path (e.g. /data/sessions) or
+    // sits beneath an allowed download root.
+    const sessionDirs = await resolveSessionDirs(policy, home, realHome);
+    for (const sessionRoot of sessionDirs) {
+      if (below(real, sessionRoot) !== null) {
+        return "it is inside the server's session directory, where credentials and sign-in state live";
+      }
+    }
+
+    const operatorRoots = [...(policy.allowRoots ?? []), ...(await downloadRootsFromEnv(undefined, home))];
     for (const root of operatorRoots) {
-      if (below(real, await resolveReal(root))) return null;
+      const rel = below(real, await resolveReal(root));
+      if (rel !== null) {
+        if (policy.restrictToRoots === true) {
+          const hiddenPart = rel.find((part) => part.startsWith("."));
+          if (hiddenPart !== undefined) {
+            return `its path goes through the hidden folder "${hiddenPart}", where settings and credentials live`;
+          }
+        }
+        return null;
+      }
+    }
+    if (policy.restrictToRoots === true) {
+      return operatorRoots.length === 0
+        ? "this server runs remotely and D2L_DOWNLOAD_ROOTS is not configured, so saving to the server's disk is disabled; omit downloadPath to receive a temporary downloadUrl link instead"
+        : "this server only allows downloads inside D2L_DOWNLOAD_ROOTS";
     }
     return await refusedByRules(real, realHome);
   } catch (error) {
@@ -204,15 +276,22 @@ export function resetDownloadRootWarnings(): void {
 /**
  * The extra allowed roots named by D2L_DOWNLOAD_ROOTS, a path.delimiter
  * separated list, each resolved to its real path. It is read from the
- * server's own environment, which a tool argument cannot set. A listed root
- * overrides every rule above, even inside the home folder (a hidden or
- * ~/Library folder the user really wants), except that an entry which is a
- * relative path, a device path, a drive root, the home folder itself or a
- * folder that holds the home folder is ignored with a warning.
+ * server's own environment, which a tool argument cannot set. In default mode
+ * a listed root overrides every soft rule above, except that the session
+ * directory, a relative path, a device path, a drive root, the home folder
+ * itself or a folder that holds the home folder is ignored with a warning.
  */
 export async function downloadRootsFromEnv(value: string | undefined = process.env.D2L_DOWNLOAD_ROOTS, home: string = os.homedir()): Promise<string[]> {
   const roots: string[] = [];
   const realHome = await resolveReal(home);
+  const rawSessionDir = process.env.D2L_SESSION_DIR?.trim();
+  let realSessionDir: string | undefined;
+  if (rawSessionDir) {
+    const expanded = expandHome(rawSessionDir, home);
+    if (path.isAbsolute(expanded) && !DEVICE_PREFIX.test(expanded)) {
+      realSessionDir = await resolveReal(expanded).catch(() => undefined);
+    }
+  }
   for (const entry of (value ?? "").split(path.delimiter).map((e) => e.trim()).filter(Boolean)) {
     let reason: string | null = null;
     let real = entry;
@@ -227,6 +306,7 @@ export async function downloadRootsFromEnv(value: string | undefined = process.e
       if (!reason && path.parse(real).root === real) reason = "it is the root of a drive";
       else if (!reason && fold(real) === fold(realHome)) reason = "it is your home folder itself";
       else if (!reason && below(realHome, real)) reason = "it contains your home folder";
+      else if (!reason && realSessionDir && below(real, realSessionDir) !== null) reason = "it is inside the server's session directory";
     }
     if (reason) {
       if (!warnedRoots.has(entry)) {

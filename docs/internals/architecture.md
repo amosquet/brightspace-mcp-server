@@ -48,7 +48,7 @@ Named here are the files you are most likely to need. Every folder is listed; no
 | `src/runtime-relay.ts` | Default stdio command: relays each message to the shared runtime, starting one (detached `runtime <dir>`) when none answers |
 | `src/shared-runtime.ts` | `runtime`: the one shared runtime per settings and version (owner lock, 0600 state file with port and random token, idle stop) |
 | `src/server.ts` | The shared runtime's session, sign-in and API client, and the McpServer factory that registers every tool and prompt |
-| `src/http-server.ts` | `http`: stateless Streamable HTTP on 127.0.0.1 with Host/Origin, bearer token and body checks |
+| `src/http-server.ts` | `http`: stateless Streamable HTTP (`127.0.0.1` by default, or `0.0.0.0` via `--host` / `D2L_HTTP_HOST`) with Host/Origin, CORS, `/healthz`, bearer token and body checks |
 | `src/setup.ts` | `setup`: the interactive wizard and `--sign-in`; routes `--prepare` |
 | `src/auth-cli.ts` | `auth`: manual sign-in; `auth --logout` ends the saved session; `--automatic` is the background child |
 | `src/doctor.ts` | `doctor`: the beginner diagnostic |

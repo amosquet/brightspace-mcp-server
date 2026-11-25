@@ -11,12 +11,16 @@ vi.mock("../../src/auth/credential-store.js", () => ({
   getStoredTotpUri: fake.getTotp,
   setStoredTotpUri: fake.setTotp,
   deleteStoredPassword: fake.del,
+  NativeCredentialStoreError: class NativeCredentialStoreError extends Error {
+    readonly code = "NATIVE_CREDENTIAL_STORE_UNAVAILABLE";
+  },
 }));
 vi.mock("../../src/utils/config-store.js", () => ({
   saveConfigStore: fake.save, loadConfigStore: fake.load, configStoreExists: fake.exists,
   getConfigStorePath: () => "/dummy/config.json",
 }));
 vi.mock("../../src/auth/auth-lock.js", () => ({ acquireProcessLock: fake.acquire }));
+import { NativeCredentialStoreError } from "../../src/auth/credential-store.js";
 import { resolveStoredPassword, saveSecureConfig } from "../../src/utils/secure-config.js";
 
 describe("secure configuration", () => {
@@ -184,5 +188,27 @@ describe("secure configuration", () => {
       .rejects.toThrow("vault locked");
     expect(fake.release).toHaveBeenCalledOnce();
     expect(fake.locked).toBe(false);
+  });
+
+  it("keeps D2L_PASSWORD in memory when the native credential store is unavailable in containers", async () => {
+    vi.stubEnv("D2L_PASSWORD", "env-secret");
+    fake.set.mockRejectedValue(new NativeCredentialStoreError("no secret-tool"));
+    await expect(resolveStoredPassword("https://school.example", "alice", null)).resolves.toBe("env-secret");
+  });
+
+  it.each([
+    ["D2L_SESSION_KEY", "k".repeat(32)],
+    ["D2L_ACCESS_TOKEN", "env-access-token"],
+    ["D2L_SESSION_COOKIE", "d2lSessionVal=a;d2lSecureSessionVal=b"],
+  ])("returns undefined instead of crashing when %s is set and the keyring is unavailable", async (envName, value) => {
+    vi.stubEnv(envName, value);
+    fake.get.mockRejectedValue(new NativeCredentialStoreError("no secret-tool"));
+    await expect(resolveStoredPassword("https://school.example", "alice", null)).resolves.toBeUndefined();
+  });
+
+  it("still surfaces NativeCredentialStoreError when only D2L_HTTP_TOKEN is set", async () => {
+    vi.stubEnv("D2L_HTTP_TOKEN", "x".repeat(32));
+    fake.get.mockRejectedValue(new NativeCredentialStoreError("no secret-tool"));
+    await expect(resolveStoredPassword("https://school.example", "alice", null)).rejects.toBeInstanceOf(NativeCredentialStoreError);
   });
 });

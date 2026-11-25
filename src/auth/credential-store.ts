@@ -4,7 +4,7 @@
  * Licensed under MIT. See LICENSE file for details.
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
@@ -253,6 +253,46 @@ function sessionKeyAccount(canonicalDir: string): string {
   return `session-key:${createHash("sha256").update(canonicalDir).digest("hex")}`;
 }
 
+const MIN_SESSION_KEY_LENGTH = 32;
+
+function resolveEnvSessionKey(canonicalDir: string): Buffer | undefined {
+  const raw = process.env.D2L_SESSION_KEY;
+  if (raw === undefined || raw === "") return undefined;
+  if (/[\r\n\0]/.test(raw) || raw !== raw.trim()) {
+    throw new NativeCredentialStoreError("D2L_SESSION_KEY must be a single line with no leading or trailing whitespace.");
+  }
+  if (raw.length < MIN_SESSION_KEY_LENGTH) {
+    throw new NativeCredentialStoreError(`D2L_SESSION_KEY must be at least ${MIN_SESSION_KEY_LENGTH} characters.`);
+  }
+  return createHmac("sha256", raw).update(`brightspace-mcp-server:session-key:${canonicalDir}`).digest();
+}
+
+async function acquireKeyInitLock(canonicalDir: string): Promise<() => Promise<void>> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      return await acquireProcessLock(path.join(canonicalDir, ".keyring-key-init.lock"));
+    } catch (error) {
+      if (!(error instanceof AuthenticationInProgressError) || attempt === 99) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw new AuthenticationInProgressError();
+}
+
+async function assertNoOrphanedEncryptedState(canonicalDir: string): Promise<void> {
+  // Creating a replacement key would orphan other encrypted files in this directory.
+  for (const name of ["storage-state.encrypted.json", "session.json"]) {
+    try {
+      const contents = await fs.readFile(path.join(canonicalDir, name), "utf8");
+      if (name === "storage-state.encrypted.json" || JSON.parse(contents).version === 2) {
+        throw new NativeCredentialStoreError("The session encryption key is missing, but encrypted authentication state still exists. Restore the native credential store entry before retrying. Saved data was preserved.");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
 /**
  * Whether this session directory already holds a native encryption key, which
  * is what separates an upgrade that has not run yet from one that finished.
@@ -261,6 +301,9 @@ function sessionKeyAccount(canonicalDir: string): string {
  */
 export async function hasSessionEncryptionKey(sessionDir: string, backend: CredentialBackend = nativeCredentialBackend): Promise<boolean> {
   const canonicalDir = await fs.realpath(sessionDir);
+  if (backend === nativeCredentialBackend && resolveEnvSessionKey(canonicalDir)) {
+    return true;
+  }
   return (await backend.getPassword(SERVICE, sessionKeyAccount(canonicalDir))) !== null;
 }
 
@@ -268,6 +311,10 @@ export async function hasSessionEncryptionKey(sessionDir: string, backend: Crede
 export async function getSessionEncryptionKey(sessionDir: string, backend: CredentialBackend = nativeCredentialBackend, create = true): Promise<Buffer> {
   await fs.mkdir(sessionDir, { recursive: true, mode: 0o700 });
   const canonicalDir = await fs.realpath(sessionDir);
+  if (backend === nativeCredentialBackend) {
+    const envKey = resolveEnvSessionKey(canonicalDir);
+    if (envKey) return envKey;
+  }
   const account = sessionKeyAccount(canonicalDir);
   const existing = await backend.getPassword(SERVICE, account);
   if (existing !== null) {
@@ -284,30 +331,11 @@ export async function getSessionEncryptionKey(sessionDir: string, backend: Crede
     throw new NativeCredentialStoreError("The session encryption key is missing from the native credential store. Existing encrypted session data was preserved. Restore the native credential store entry before retrying.");
   }
   // Only initialization is serialized. Native secret stores do not provide CAS.
-  let release: (() => Promise<void>) | undefined;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try {
-      release = await acquireProcessLock(path.join(canonicalDir, ".keyring-key-init.lock"));
-      break;
-    } catch (error) {
-      if (!(error instanceof AuthenticationInProgressError) || attempt === 99) throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
-    }
-  }
+  const release = await acquireKeyInitLock(canonicalDir);
   try {
     const current = await backend.getPassword(SERVICE, account);
     if (current !== null) return decodeKey(current);
-    // Creating a replacement key would orphan other encrypted files in this directory.
-    for (const name of ["storage-state.encrypted.json", "session.json"]) {
-      try {
-        const contents = await fs.readFile(path.join(canonicalDir, name), "utf8");
-        if (name === "storage-state.encrypted.json" || JSON.parse(contents).version === 2) {
-          throw new NativeCredentialStoreError("The session encryption key is missing, but encrypted authentication state still exists. Restore the native credential store entry before retrying. Saved data was preserved.");
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-    }
+    await assertNoOrphanedEncryptedState(canonicalDir);
     const key = randomBytes(32).toString("hex");
     await backend.setPassword(SERVICE, account, key);
     if (await backend.getPassword(SERVICE, account) !== key) {
@@ -315,6 +343,6 @@ export async function getSessionEncryptionKey(sessionDir: string, backend: Crede
     }
     return decodeKey(key);
   } finally {
-    await release?.();
+    await release();
   }
 }

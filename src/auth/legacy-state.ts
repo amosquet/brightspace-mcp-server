@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { acquireProcessLock, AuthenticationInProgressError } from "./auth-lock.js";
 import { BrowserStateStore } from "./browser-state-store.js";
-import { NativeCredentialStoreError } from "./credential-store.js";
+import { hasSessionEncryptionKey, NativeCredentialStoreError } from "./credential-store.js";
 import { SessionStore } from "./session-store.js";
 import { log } from "../utils/logger.js";
 
@@ -82,6 +82,7 @@ export async function migrateLegacyState(sessionRoot: string): Promise<LegacyMig
 
   const release = await acquireProcessLock(path.join(sessionRoot, ".auth.lock"));
   try {
+    const legacyUpgradeInProgress = !await hasSessionEncryptionKey(sessionRoot);
     const result: LegacyMigrationResult = { tokenState: "absent", browserState: "absent" };
     // Recheck under the process lock; never follow links into another directory.
     const token = await fileKind(sessionRoot, "session.json");
@@ -102,7 +103,7 @@ export async function migrateLegacyState(sessionRoot: string): Promise<LegacyMig
       reportPreserved("browser state");
       result.browserState = "preserved";
     } else if (plain !== "absent" || encrypted !== "absent") {
-      result.browserState = await migrate("browser state", () => new BrowserStateStore(sessionRoot).load());
+      result.browserState = await migrate("browser state", () => new BrowserStateStore(sessionRoot, { legacyUpgradeInProgress }).load());
     }
     return result;
   } finally {

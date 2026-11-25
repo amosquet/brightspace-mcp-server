@@ -170,6 +170,34 @@ describe("sign_in window decision", () => {
     expect(text).not.toMatch(/window is opening/i);
     expect(text).toContain(authPendingNotice(new AuthProcessError("inProgress", "raw message")));
   });
+
+  it("refuses visible: true when remote browser windows are disabled", async () => {
+    const remoteRunner = {
+      run,
+      busy,
+      requestVisibleBrowser,
+      canOpenVisibleBrowser: vi.fn().mockReturnValue(false),
+    };
+    const { text, isError } = await signIn(config(), { visible: true }, remoteRunner);
+    expect(isError).toBe(true);
+    expect(text).toMatch(/cannot open a browser window/i);
+    expect(requestVisibleBrowser).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("refuses headless-only sign-in when visible browser windows are disabled and no password is saved", async () => {
+    const remoteRunner = {
+      run,
+      busy,
+      requestVisibleBrowser,
+      canOpenVisibleBrowser: vi.fn().mockReturnValue(false),
+    };
+    const { text, isError } = await signIn(config({ username: undefined, password: undefined }), {}, remoteRunner);
+    expect(isError).toBe(true);
+    expect(text).toMatch(/No password is saved/i);
+    expect(requestVisibleBrowser).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
 });
 
 describe("sign_in failure answers come from the shared guidance", () => {

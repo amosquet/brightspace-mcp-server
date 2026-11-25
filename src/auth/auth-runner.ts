@@ -227,6 +227,8 @@ export interface AuthRunnerOptions {
    * challenge there, which keeps the sign-in from being abandoned.
    */
   sessionDir?: string;
+  /** Whether requestVisibleBrowser() is permitted (disabled on non-loopback HTTP servers). */
+  allowVisibleBrowser?: boolean;
 }
 
 /**
@@ -513,6 +515,7 @@ export class AuthRunner {
    * own; that is the standing rule the D2L_HEADLESS default encodes.
    */
   private visibleNextChild = false;
+  private allowVisibleBrowser: boolean;
 
   constructor(options: AuthRunnerOptions = {}) {
     // Resolve paths relative to this file's compiled location (build/auth/auth-runner.js)
@@ -521,6 +524,16 @@ export class AuthRunner {
     this.timeoutMs = options.timeoutMs ?? AUTH_TIMEOUT_MS;
     this.onProgress = options.onProgress;
     this.sessionDir = options.sessionDir;
+    this.allowVisibleBrowser = options.allowVisibleBrowser ?? true;
+  }
+
+  canOpenVisibleBrowser(): boolean {
+    return this.allowVisibleBrowser;
+  }
+
+  setAllowVisibleBrowser(allow: boolean): void {
+    this.allowVisibleBrowser = allow;
+    if (!allow) this.visibleNextChild = false;
   }
 
   /**
@@ -538,10 +551,11 @@ export class AuthRunner {
    * Ask that the next child this runner spawns sign in with a visible window
    * (see visibleNextChild). Takes effect only for a child this runner starts:
    * a call that joins a sign-in already running inherits that sign-in's mode,
-   * so sign_in checks busy() before asking.
+   * so sign_in checks busy() before asking. Ignored when visible browser mode
+   * is disabled (e.g. non-loopback HTTP mode).
    */
   requestVisibleBrowser(): void {
-    this.visibleNextChild = true;
+    if (this.allowVisibleBrowser) this.visibleNextChild = true;
   }
 
   /**
